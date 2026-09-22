@@ -1,0 +1,95 @@
+"""Minimal Alemi et al. (2018) efficient balanced spiking network."""
+
+from __future__ import annotations
+import numpy as np
+
+
+class AlemiEBN:
+    """EBN with fixed fast weights and locally learned slow weights."""
+
+    def __init__(
+        self,
+        state_dim,
+        n_neurons,
+        dt,
+        *,
+        lam=20.0,
+        mu=1e-3,
+        nu=1e-3,
+        eta=1e-3,
+        feedback_gain=10.0,
+        seed=0,
+    ):
+        self.state_dim = state_dim
+        self.n_neurons = n_neurons
+        self.dt = dt
+        self.lam = lam
+        self.mu = mu
+        self.nu = nu
+        self.eta = eta
+        self.feedback_gain = feedback_gain
+
+        rng = np.random.default_rng(seed)
+        self.D = rng.normal(size=(state_dim, n_neurons))
+        self.D /= np.linalg.norm(self.D, axis=0, keepdims=True) + 1e-12
+
+        self.W_fast = self.D.T @ self.D + mu * np.eye(n_neurons)
+        self.M = rng.normal(scale=1.0 / np.sqrt(n_neurons), size=(n_neurons, n_neurons))
+        self.theta = rng.uniform(-1.0, 1.0, size=n_neurons)
+        self.W_slow = np.zeros((n_neurons, n_neurons))
+
+        self.threshold = 0.5 * (
+            np.sum(self.D * self.D, axis=0) + mu + nu
+        )
+        self.u = np.zeros(n_neurons)
+        self.r = np.zeros(n_neurons)
+        self.spikes = np.zeros(n_neurons)
+
+    @property
+    def decoded_state(self):
+        return self.D @ self.r
+
+    def reset(self):
+        self.u.fill(0.0)
+        self.r.fill(0.0)
+        self.spikes.fill(0.0)
+
+    def basis(self):
+        return np.tanh(self.M @ self.r + self.theta)
+
+    def step(self, command, target_state=None, *, learn=True):
+        command = np.asarray(command, dtype=float)
+        if command.shape != (self.state_dim,):
+            raise ValueError(f"command must have shape {(self.state_dim,)}")
+
+        x_hat = self.decoded_state
+        if target_state is None:
+            error = np.zeros(self.state_dim)
+        else:
+            target_state = np.asarray(target_state, dtype=float)
+            if target_state.shape != (self.state_dim,):
+                raise ValueError(f"target_state must have shape {(self.state_dim,)}")
+            error = target_state - x_hat
+
+        psi = self.basis()
+        projected_error = self.D.T @ error
+
+        drive = (
+            -self.lam * self.u
+            + self.D.T @ command
+            + self.W_slow @ psi
+            + self.feedback_gain * projected_error
+        )
+        self.u += self.dt * drive
+
+        self.spikes = (self.u > self.threshold).astype(float)
+        if np.any(self.spikes):
+            self.u -= self.W_fast @ self.spikes
+
+        self.r += self.dt * (-self.lam * self.r)
+        self.r += self.spikes
+
+        if learn and target_state is not None:
+            self.W_slow += self.eta * self.dt * np.outer(projected_error, psi)
+
+        return self.decoded_state.copy()
