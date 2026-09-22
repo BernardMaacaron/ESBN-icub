@@ -10,7 +10,10 @@ requires-python = ">=3.10"
 dependencies = ["numpy>=1.26"]
 
 [project.optional-dependencies]
-robot = ["pybullet>=3.2.6", "icub-models"]
+robot = [
+    "pybullet>=3.2.6",
+    "icub-models @ git+https://github.com/robotology/icub-models.git@dca8c618c264be70ce285bad38040411725e3551",
+]
 test = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
