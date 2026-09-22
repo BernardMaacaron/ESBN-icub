@@ -23,4 +23,4 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[test,robot]"
-      - run: pytest -q tests/test_icub_teacher.py
+      - run: pytest -q tests/test_icub_teacher.py tests/test_robot_experiment.py
