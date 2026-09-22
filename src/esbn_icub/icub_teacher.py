@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import tempfile
+import xml.etree.ElementTree as ET
 
 import numpy as np
 
@@ -30,19 +31,74 @@ RIGHT_ARM_JOINTS = (
 
 
 def _resolved_genova11_urdf():
+    """Resolve package paths and zero-mass fixed auxiliary links for Bullet.
+
+    The official model contains many massless sensor/skin/frame links with no
+    inertial element. URDF semantics permit these fixed auxiliary links, but
+    PyBullet otherwise assigns them a default mass/inertia, which would corrupt
+    the robot dynamics. We explicitly give only such fixed auxiliary links zero
+    mass and reject any movable link that lacks inertial data.
+    """
     if icub_models is None:
         raise ImportError("icub-models is required for the robot teacher")
 
     model_path = Path(icub_models.get_model_file("iCubGenova11"))
     models_path = Path(icub_models.get_models_path())
 
-    text = model_path.read_text()
-    text = text.replace("package://iCub/", f"{models_path.parent.as_posix()}/")
+    tree = ET.parse(model_path)
+    root = tree.getroot()
+
+    joint_by_child = {}
+    for joint in root.findall("joint"):
+        child = joint.find("child")
+        if child is not None:
+            joint_by_child[child.attrib["link"]] = joint
+
+    for link in root.findall("link"):
+        if link.find("inertial") is not None:
+            continue
+
+        name = link.attrib["name"]
+        parent_joint = joint_by_child.get(name)
+
+        # The root is fixed by p.loadURDF(useFixedBase=True), so its inertial
+        # data is irrelevant; all other inertial-less links must be fixed
+        # auxiliaries or the model is unsafe for a dynamics experiment.
+        if parent_joint is not None and parent_joint.attrib.get("type") != "fixed":
+            raise RuntimeError(
+                f"Movable link {name} has no inertial data in iCubGenova11"
+            )
+
+        inertial = ET.Element("inertial")
+        ET.SubElement(inertial, "origin", xyz="0 0 0", rpy="0 0 0")
+        ET.SubElement(inertial, "mass", value="0")
+        ET.SubElement(
+            inertial,
+            "inertia",
+            ixx="0",
+            ixy="0",
+            ixz="0",
+            iyy="0",
+            iyz="0",
+            izz="0",
+        )
+        link.insert(0, inertial)
+
+    for elem in root.iter():
+        mesh = elem.find("mesh")
+        if mesh is not None:
+            filename = mesh.attrib.get("filename", "")
+            if filename.startswith("package://iCub/"):
+                mesh.attrib["filename"] = filename.replace(
+                    "package://iCub/",
+                    f"{models_path.parent.as_posix()}/",
+                    1,
+                )
 
     tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".urdf", prefix="icub_genova11_", delete=False
+        mode="wb", suffix=".urdf", prefix="icub_genova11_", delete=False
     )
-    tmp.write(text)
+    tree.write(tmp, encoding="utf-8", xml_declaration=True)
     tmp.close()
     return Path(tmp.name)
 
@@ -170,9 +226,12 @@ class ICubTeacher:
         )
 
     def state(self):
-        states = p.getJointStates(
-            self.body, self.active_joint_ids, physicsClientId=self.client
-        )
+        # PyBullet's batched getJointStates is unreliable for this large URDF
+        # on some builds; scalar queries are robust for the seven active DOFs.
+        states = [
+            p.getJointState(self.body, jid, physicsClientId=self.client)
+            for jid in self.active_joint_ids
+        ]
         q = np.array([state[0] for state in states])
         qdot = np.array([state[1] for state in states])
         return q, qdot
