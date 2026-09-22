@@ -130,10 +130,10 @@ class ICubTeacher:
                 self.body, jid, float(qi), float(vi), physicsClientId=self.client
             )
 
-        self._held_positions = {
-            jid: p.getJointState(self.body, jid, physicsClientId=self.client)[0]
-            for jid in self.inactive_joint_ids
-        }
+        # Every inactive movable joint was reset to zero above. Keeping the
+        # target explicitly avoids querying joint-state APIs for non-scalar
+        # joint types that may be present in future URDF revisions.
+        self._held_positions = {jid: 0.0 for jid in self.inactive_joint_ids}
 
         p.setJointMotorControlArray(
             self.body,
