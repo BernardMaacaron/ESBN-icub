@@ -68,13 +68,21 @@ class ICubTeacher:
         )
 
         self.joint_name_to_id = {}
-        self.movable_joint_ids = []
+        scalar_dofs = []
         for jid in range(p.getNumJoints(self.body, physicsClientId=self.client)):
             info = p.getJointInfo(self.body, jid, physicsClientId=self.client)
             name = info[1].decode()
             self.joint_name_to_id[name] = jid
-            if info[2] != p.JOINT_FIXED:
-                self.movable_joint_ids.append(jid)
+            if info[3] >= 0:
+                if info[2] not in (p.JOINT_REVOLUTE, p.JOINT_PRISMATIC):
+                    raise RuntimeError(
+                        f"Unsupported non-scalar joint {name} with Bullet type {info[2]}"
+                    )
+                scalar_dofs.append((info[3], jid))
+
+        # Bullet's generalized-coordinate vectors are ordered by qIndex, not
+        # by raw URDF joint index.
+        self.dof_joint_ids = [jid for _, jid in sorted(scalar_dofs)]
 
         missing = [name for name in RIGHT_ARM_JOINTS if name not in self.joint_name_to_id]
         if missing:
@@ -82,10 +90,10 @@ class ICubTeacher:
 
         self.active_joint_ids = [self.joint_name_to_id[name] for name in RIGHT_ARM_JOINTS]
         self.active_dof_indices = [
-            self.movable_joint_ids.index(jid) for jid in self.active_joint_ids
+            self.dof_joint_ids.index(jid) for jid in self.active_joint_ids
         ]
         self.inactive_joint_ids = [
-            jid for jid in self.movable_joint_ids if jid not in self.active_joint_ids
+            jid for jid in self.dof_joint_ids if jid not in self.active_joint_ids
         ]
 
         self.lower = np.array([
@@ -122,7 +130,7 @@ class ICubTeacher:
         if q.shape != (self.n_dof,) or qdot.shape != (self.n_dof,):
             raise ValueError(f"q and qdot must have shape {(self.n_dof,)}")
 
-        for jid in self.movable_joint_ids:
+        for jid in self.dof_joint_ids:
             p.resetJointState(self.body, jid, 0.0, 0.0, physicsClientId=self.client)
 
         for jid, qi, vi in zip(self.active_joint_ids, q, qdot):
@@ -188,16 +196,14 @@ class ICubTeacher:
         p.stepSimulation(physicsClientId=self.client)
         return self.state()
 
-    def _all_movable_state(self):
-        states = p.getJointStates(
-            self.body, self.movable_joint_ids, physicsClientId=self.client
-        )
-        q = np.array([state[0] for state in states])
-        qdot = np.array([state[1] for state in states])
-        return q, qdot
+    def _full_state_vectors(self):
+        # Inactive DOFs are held at zero throughout this experiment.
+        # Constructing the vectors directly also avoids relying on Bullet
+        # state-query behavior for auxiliary joints in the full iCub URDF.
+        return np.zeros(len(self.dof_joint_ids)), np.zeros(len(self.dof_joint_ids))
 
     def mass_matrix(self, q=None):
-        q_all, _ = self._all_movable_state()
+        q_all, _ = self._full_state_vectors()
         if q is not None:
             q = np.asarray(q, dtype=float)
             if q.shape != (self.n_dof,):
@@ -218,7 +224,7 @@ class ICubTeacher:
         if q.shape != expected or qdot.shape != expected or qddot.shape != expected:
             raise ValueError(f"q, qdot and qddot must have shape {expected}")
 
-        q_all, qdot_all = self._all_movable_state()
+        q_all, qdot_all = self._full_state_vectors()
         qddot_all = np.zeros_like(q_all)
         q_all[self.active_dof_indices] = q
         qdot_all[self.active_dof_indices] = qdot
