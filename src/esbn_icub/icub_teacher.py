@@ -1,0 +1,234 @@
+"""PyBullet teacher for the official iCubGenova11 rigid-body model."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import tempfile
+
+import numpy as np
+
+try:
+    import pybullet as p
+except ImportError:
+    p = None
+
+try:
+    import icub_models
+except ImportError:
+    icub_models = None
+
+
+RIGHT_ARM_JOINTS = (
+    "r_shoulder_pitch",
+    "r_shoulder_roll",
+    "r_shoulder_yaw",
+    "r_elbow",
+    "r_wrist_prosup",
+    "r_wrist_pitch",
+    "r_wrist_yaw",
+)
+
+
+def _resolved_genova11_urdf():
+    if icub_models is None:
+        raise ImportError("icub-models is required for the robot teacher")
+
+    model_path = Path(icub_models.get_model_file("iCubGenova11"))
+    models_path = Path(icub_models.get_models_path())
+
+    text = model_path.read_text()
+    text = text.replace("package://iCub/", f"{(models_path / 'iCub').as_posix()}/")
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".urdf", prefix="icub_genova11_", delete=False
+    )
+    tmp.write(text)
+    tmp.close()
+    return Path(tmp.name)
+
+
+class ICubTeacher:
+    """Fixed-base iCubGenova11 with direct torque control of the right arm."""
+
+    def __init__(self, dt=1e-3, gui=False):
+        if p is None:
+            raise ImportError("pybullet is required for the robot teacher")
+
+        self.dt = dt
+        self.client = p.connect(p.GUI if gui else p.DIRECT)
+        p.setTimeStep(dt, physicsClientId=self.client)
+        p.setGravity(0.0, 0.0, -9.81, physicsClientId=self.client)
+
+        self.urdf_path = _resolved_genova11_urdf()
+        self.body = p.loadURDF(
+            str(self.urdf_path),
+            useFixedBase=True,
+            flags=p.URDF_USE_INERTIA_FROM_FILE,
+            physicsClientId=self.client,
+        )
+
+        self.joint_name_to_id = {}
+        self.movable_joint_ids = []
+        for jid in range(p.getNumJoints(self.body, physicsClientId=self.client)):
+            info = p.getJointInfo(self.body, jid, physicsClientId=self.client)
+            name = info[1].decode()
+            self.joint_name_to_id[name] = jid
+            if info[2] != p.JOINT_FIXED:
+                self.movable_joint_ids.append(jid)
+
+        missing = [name for name in RIGHT_ARM_JOINTS if name not in self.joint_name_to_id]
+        if missing:
+            raise RuntimeError(f"Missing expected Genova11 joints: {missing}")
+
+        self.active_joint_ids = [self.joint_name_to_id[name] for name in RIGHT_ARM_JOINTS]
+        self.active_dof_indices = [
+            self.movable_joint_ids.index(jid) for jid in self.active_joint_ids
+        ]
+        self.inactive_joint_ids = [
+            jid for jid in self.movable_joint_ids if jid not in self.active_joint_ids
+        ]
+
+        self.lower = np.array([
+            p.getJointInfo(self.body, jid, physicsClientId=self.client)[8]
+            for jid in self.active_joint_ids
+        ])
+        self.upper = np.array([
+            p.getJointInfo(self.body, jid, physicsClientId=self.client)[9]
+            for jid in self.active_joint_ids
+        ])
+        self.effort = np.array([
+            p.getJointInfo(self.body, jid, physicsClientId=self.client)[10]
+            for jid in self.active_joint_ids
+        ])
+
+        self._held_positions = {}
+        self.reset(np.zeros(self.n_dof), np.zeros(self.n_dof))
+
+    @property
+    def n_dof(self):
+        return len(self.active_joint_ids)
+
+    def close(self):
+        if p.isConnected(self.client):
+            p.disconnect(self.client)
+        try:
+            self.urdf_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def reset(self, q, qdot):
+        q = np.asarray(q, dtype=float)
+        qdot = np.asarray(qdot, dtype=float)
+        if q.shape != (self.n_dof,) or qdot.shape != (self.n_dof,):
+            raise ValueError(f"q and qdot must have shape {(self.n_dof,)}")
+
+        for jid in self.movable_joint_ids:
+            p.resetJointState(self.body, jid, 0.0, 0.0, physicsClientId=self.client)
+
+        for jid, qi, vi in zip(self.active_joint_ids, q, qdot):
+            p.resetJointState(
+                self.body, jid, float(qi), float(vi), physicsClientId=self.client
+            )
+
+        self._held_positions = {
+            jid: p.getJointState(self.body, jid, physicsClientId=self.client)[0]
+            for jid in self.inactive_joint_ids
+        }
+
+        p.setJointMotorControlArray(
+            self.body,
+            self.active_joint_ids,
+            p.VELOCITY_CONTROL,
+            forces=[0.0] * self.n_dof,
+            physicsClientId=self.client,
+        )
+        self._hold_inactive_joints()
+
+    def _hold_inactive_joints(self):
+        if not self.inactive_joint_ids:
+            return
+        p.setJointMotorControlArray(
+            self.body,
+            self.inactive_joint_ids,
+            p.POSITION_CONTROL,
+            targetPositions=[self._held_positions[jid] for jid in self.inactive_joint_ids],
+            forces=[
+                max(1.0, float(p.getJointInfo(
+                    self.body, jid, physicsClientId=self.client
+                )[10]))
+                for jid in self.inactive_joint_ids
+            ],
+            physicsClientId=self.client,
+        )
+
+    def state(self):
+        states = p.getJointStates(
+            self.body, self.active_joint_ids, physicsClientId=self.client
+        )
+        q = np.array([state[0] for state in states])
+        qdot = np.array([state[1] for state in states])
+        return q, qdot
+
+    def set_torque(self, tau):
+        tau = np.asarray(tau, dtype=float)
+        if tau.shape != (self.n_dof,):
+            raise ValueError(f"tau must have shape {(self.n_dof,)}")
+        p.setJointMotorControlArray(
+            self.body,
+            self.active_joint_ids,
+            p.TORQUE_CONTROL,
+            forces=tau.tolist(),
+            physicsClientId=self.client,
+        )
+
+    def step(self, tau=None):
+        if tau is not None:
+            self.set_torque(tau)
+        self._hold_inactive_joints()
+        p.stepSimulation(physicsClientId=self.client)
+        return self.state()
+
+    def _all_movable_state(self):
+        states = p.getJointStates(
+            self.body, self.movable_joint_ids, physicsClientId=self.client
+        )
+        q = np.array([state[0] for state in states])
+        qdot = np.array([state[1] for state in states])
+        return q, qdot
+
+    def mass_matrix(self, q=None):
+        q_all, _ = self._all_movable_state()
+        if q is not None:
+            q = np.asarray(q, dtype=float)
+            if q.shape != (self.n_dof,):
+                raise ValueError(f"q must have shape {(self.n_dof,)}")
+            q_all[self.active_dof_indices] = q
+
+        M = np.asarray(p.calculateMassMatrix(
+            self.body, q_all.tolist(), physicsClientId=self.client
+        ))
+        idx = np.ix_(self.active_dof_indices, self.active_dof_indices)
+        return M[idx]
+
+    def inverse_dynamics(self, q, qdot, qddot):
+        q = np.asarray(q, dtype=float)
+        qdot = np.asarray(qdot, dtype=float)
+        qddot = np.asarray(qddot, dtype=float)
+        expected = (self.n_dof,)
+        if q.shape != expected or qdot.shape != expected or qddot.shape != expected:
+            raise ValueError(f"q, qdot and qddot must have shape {expected}")
+
+        q_all, qdot_all = self._all_movable_state()
+        qddot_all = np.zeros_like(q_all)
+        q_all[self.active_dof_indices] = q
+        qdot_all[self.active_dof_indices] = qdot
+        qddot_all[self.active_dof_indices] = qddot
+
+        tau_all = np.asarray(p.calculateInverseDynamics(
+            self.body,
+            q_all.tolist(),
+            qdot_all.tolist(),
+            qddot_all.tolist(),
+            physicsClientId=self.client,
+        ))
+        return tau_all[self.active_dof_indices]
