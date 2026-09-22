@@ -37,7 +37,7 @@ def _resolved_genova11_urdf():
     models_path = Path(icub_models.get_models_path())
 
     text = model_path.read_text()
-    text = text.replace("package://iCub/", f"{(models_path / 'iCub').as_posix()}/")
+    text = text.replace("package://iCub/", f"{models_path.parent.as_posix()}/")
 
     tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix=".urdf", prefix="icub_genova11_", delete=False
