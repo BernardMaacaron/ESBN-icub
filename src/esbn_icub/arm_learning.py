@@ -213,3 +213,109 @@ def evaluate_unseen_episode(
         "targets": targets,
         "estimates": estimates,
     }
+
+
+
+def evaluate_untrained_baseline(
+    *,
+    dt=1e-3,
+    n_neurons=128,
+    seed=0,
+    torque_fraction=0.10,
+    noise_std=0.5,
+    n_steps=1000,
+    sync_steps=300,
+):
+    """Evaluate a fresh, untrained network using the same unseen-state protocol."""
+    teacher, experiment, normalizer, net = build_arm_experiment(
+        dt=dt,
+        n_neurons=n_neurons,
+        seed=seed,
+        torque_fraction=torque_fraction,
+        noise_std=noise_std,
+    )
+    try:
+        return evaluate_unseen_episode(
+            experiment,
+            normalizer,
+            net,
+            n_steps=n_steps,
+            sync_steps=sync_steps,
+            seed=seed + 1000,
+        )
+    finally:
+        teacher.close()
+
+
+def sweep_arm_hyperparameters(
+    *,
+    etas=(0.1, 0.5, 1.0, 2.0),
+    decoder_scales=(None, 0.05),
+    feedback_gains=(20.0, 40.0),
+    n_neurons=128,
+    n_episodes=8,
+    steps_per_episode=1000,
+    eval_steps=1000,
+    sync_steps=300,
+    torque_fraction=0.10,
+    noise_std=0.5,
+    seed=0,
+):
+    """Run a deterministic compact sweep and return comparable metrics.
+
+    Every candidate receives the same teacher/excitation seed and evaluation
+    seed so differences reflect the network hyperparameters rather than a
+    different input realization.
+    """
+    rows = []
+
+    for eta in etas:
+        for decoder_scale in decoder_scales:
+            for feedback_gain in feedback_gains:
+                teacher, experiment, normalizer, net = build_arm_experiment(
+                    dt=1e-3,
+                    n_neurons=n_neurons,
+                    seed=seed,
+                    torque_fraction=torque_fraction,
+                    noise_std=noise_std,
+                    eta=eta,
+                    feedback_gain=feedback_gain,
+                    decoder_scale=decoder_scale,
+                )
+                try:
+                    episodes = train_episodes(
+                        experiment,
+                        normalizer,
+                        net,
+                        n_episodes=n_episodes,
+                        steps_per_episode=steps_per_episode,
+                        seed=seed,
+                        final_feedback_gain=max(5.0, feedback_gain / 4.0),
+                    )
+                    result = evaluate_unseen_episode(
+                        experiment,
+                        normalizer,
+                        net,
+                        n_steps=eval_steps,
+                        sync_steps=sync_steps,
+                        seed=seed + 123,
+                    )
+                    rows.append({
+                        "eta": float(eta),
+                        "decoder_scale": (
+                            None if decoder_scale is None else float(decoder_scale)
+                        ),
+                        "feedback_gain": float(feedback_gain),
+                        "first_episode_rmse": float(episodes[0]),
+                        "last_episode_rmse": float(episodes[-1]),
+                        "sync_rmse": result["sync_rmse"],
+                        "autonomous_rmse": result["rmse"],
+                        "q_rmse": result["q_rmse"],
+                        "qdot_rmse": result["qdot_rmse"],
+                        "tau_rmse": result["tau_rmse"],
+                        "slow_weight_norm": float(np.linalg.norm(net.W_slow)),
+                    })
+                finally:
+                    teacher.close()
+
+    return rows
