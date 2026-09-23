@@ -19,7 +19,7 @@ jobs:
           python - <<'PY'
           from esbn_icub.bistable_demo import run_bistable_trials
           r = run_bistable_trials(
-              train_trials=200,
+              train_trials=500,
               train_trial_steps=1000,
               command_steps=500,
               test_steps=6000,
