@@ -131,7 +131,7 @@ def train_episodes(
 
         q0 = rng.uniform(q_low, q_high)
         qdot0 = rng.uniform(-qdot_scale, qdot_scale)
-        experiment.reset(q0, qdot0)
+        experiment.reset(q0, qdot0, excitation_seed=seed + episode)
         net.reset()
 
         error = train_steps(
@@ -172,7 +172,7 @@ def evaluate_unseen_episode(
     )
     qdot0 = np.zeros(teacher.n_dof)
 
-    experiment.reset(q0, qdot0)
+    experiment.reset(q0, qdot0, excitation_seed=seed + 10000)
     net.reset()
 
     feedback = net.feedback_gain
