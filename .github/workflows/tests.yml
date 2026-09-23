@@ -78,6 +78,7 @@ jobs:
               print({
                   "first_episode_rmse": float(episodes[0]),
                   "last_episode_rmse": float(episodes[-1]),
+                  "sync_rmse": result["sync_rmse"],
                   "autonomous_rmse": result["rmse"],
                   "q_rmse": result["q_rmse"],
                   "qdot_rmse": result["qdot_rmse"],
