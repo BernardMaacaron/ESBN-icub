@@ -19,10 +19,10 @@ jobs:
           python - <<'PY'
           from esbn_icub.bistable_demo import run_bistable_trials
           r = run_bistable_trials(
-              train_trials=30,
+              train_trials=200,
               train_trial_steps=1000,
               command_steps=500,
-              test_steps=3000,
+              test_steps=6000,
               n_neurons=50,
               seed=0,
           )
