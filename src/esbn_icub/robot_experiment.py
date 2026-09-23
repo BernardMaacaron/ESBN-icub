@@ -21,9 +21,9 @@ class RobotExperiment:
         seed=0,
     ):
         self.teacher = teacher
-        limits = torque_fraction * np.maximum(teacher.effort, 1e-6)
+        self.torque_limits = torque_fraction * np.maximum(teacher.effort, 1e-6)
         self.excitation = FilteredTorque(
-            limits,
+            self.torque_limits,
             teacher.dt,
             alpha=alpha,
             noise_std=noise_std,
