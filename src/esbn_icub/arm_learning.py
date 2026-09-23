@@ -207,6 +207,17 @@ def evaluate_unseen_episode(
     step_rmse = np.sqrt(np.mean(error**2, axis=1))
     n = teacher.n_dof
     sync_tail = sync_component_error[-min(50, sync_steps):]
+    horizons = {}
+    for horizon in (50, 100, 250, 500, 1000):
+        if horizon <= n_steps:
+            prefix = error[:horizon]
+            horizons[horizon] = {
+                "rmse": float(np.sqrt(np.mean(prefix**2))),
+                "q_rmse": float(np.sqrt(np.mean(prefix[:, :n]**2))),
+                "qdot_rmse": float(np.sqrt(np.mean(prefix[:, n:2*n]**2))),
+                "tau_rmse": float(np.sqrt(np.mean(prefix[:, 2*n:]**2))),
+            }
+
     return {
         "sync_rmse": float(np.sqrt(np.mean(sync_tail**2))),
         "sync_q_rmse": float(np.sqrt(np.mean(sync_tail[:, :n]**2))),
@@ -215,6 +226,7 @@ def evaluate_unseen_episode(
         "rmse": float(np.sqrt(np.mean(error**2))),
         "early_rmse": float(np.sqrt(np.mean(error[:min(100, n_steps)]**2))),
         "late_rmse": float(np.sqrt(np.mean(error[-min(100, n_steps):]**2))),
+        "horizon_rmse": horizons,
         "step_rmse": step_rmse,
         "q_rmse": float(np.sqrt(np.mean(error[:, :n]**2))),
         "qdot_rmse": float(np.sqrt(np.mean(error[:, n:2*n]**2))),
