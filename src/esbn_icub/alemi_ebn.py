@@ -19,6 +19,7 @@ class AlemiEBN:
         eta=1e-3,
         feedback_gain=10.0,
         decoder_scale=None,
+        basis_mode="decoded",
         seed=0,
     ):
         self.state_dim = state_dim
@@ -29,6 +30,9 @@ class AlemiEBN:
         self.nu = nu
         self.eta = eta
         self.feedback_gain = feedback_gain
+        if basis_mode not in ("decoded", "random"):
+            raise ValueError("basis_mode must be 'decoded' or 'random'")
+        self.basis_mode = basis_mode
 
         rng = np.random.default_rng(seed)
         if decoder_scale is None:
@@ -40,7 +44,18 @@ class AlemiEBN:
         )
 
         self.W_fast = self.D.T @ self.D + mu * np.eye(n_neurons)
-        self.M = rng.normal(scale=1.0 / np.sqrt(n_neurons), size=(n_neurons, n_neurons))
+        if basis_mode == "decoded":
+            # Low-rank dendritic basis: Psi_i(r)=tanh(m_i^T x_hat+theta_i),
+            # x_hat=Dr. This is the control-theoretically direct construction
+            # discussed by Alemi et al.; it is equivalent to M = M_state D.
+            self.M_state = rng.normal(size=(n_neurons, state_dim))
+            self.M = self.M_state @ self.D
+        else:
+            self.M_state = None
+            self.M = rng.normal(
+                scale=1.0 / np.sqrt(n_neurons),
+                size=(n_neurons, n_neurons),
+            )
         self.theta = rng.uniform(-1.0, 1.0, size=n_neurons)
         self.W_slow = np.zeros((n_neurons, n_neurons))
 
@@ -61,7 +76,11 @@ class AlemiEBN:
         self.spikes.fill(0.0)
 
     def basis(self):
-        return np.tanh(self.M @ self.r + self.theta)
+        if self.M_state is not None:
+            drive = self.M_state @ self.decoded_state
+        else:
+            drive = self.M @ self.r
+        return np.tanh(drive + self.theta)
 
     def step(self, command, target_state=None, *, learn=True):
         command = np.asarray(command, dtype=float)
