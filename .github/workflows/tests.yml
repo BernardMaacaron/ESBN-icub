@@ -82,6 +82,59 @@ jobs:
               print(row)
           PY
 
+      - name: Run 256-neuron arm candidate
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from esbn_icub.arm_learning import (
+              build_arm_experiment,
+              evaluate_unseen_episode,
+              train_episodes,
+          )
+
+          teacher, experiment, normalizer, net = build_arm_experiment(
+              dt=1e-3,
+              n_neurons=256,
+              seed=0,
+              torque_fraction=0.10,
+              noise_std=0.5,
+              eta=0.5,
+              feedback_gain=40.0,
+              decoder_scale=0.05,
+          )
+          try:
+              episodes = train_episodes(
+                  experiment,
+                  normalizer,
+                  net,
+                  n_episodes=50,
+                  steps_per_episode=2000,
+                  seed=0,
+                  final_feedback_gain=10.0,
+              )
+              result = evaluate_unseen_episode(
+                  experiment,
+                  normalizer,
+                  net,
+                  n_steps=3000,
+                  sync_steps=500,
+                  seed=123,
+              )
+              print({
+                  "candidate_first_episode_rmse": float(episodes[0]),
+                  "candidate_last_episode_rmse": float(episodes[-1]),
+                  "candidate_median_last10_rmse": float(np.median(episodes[-10:])),
+                  "candidate_sync_rmse": result["sync_rmse"],
+                  "candidate_autonomous_rmse": result["rmse"],
+                  "candidate_q_rmse": result["q_rmse"],
+                  "candidate_qdot_rmse": result["qdot_rmse"],
+                  "candidate_tau_rmse": result["tau_rmse"],
+                  "candidate_slow_weight_norm": float(np.linalg.norm(net.W_slow)),
+              })
+          finally:
+              teacher.close()
+          PY
+
       - name: Report short arm-learning metric
         run: |
           python - <<'PY'
