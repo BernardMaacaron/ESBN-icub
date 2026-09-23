@@ -86,3 +86,121 @@ def autonomous_steps(experiment, normalizer, net, n_steps):
         "targets": targets,
         "estimates": estimates,
     }
+
+
+
+def train_episodes(
+    experiment,
+    normalizer,
+    net,
+    *,
+    n_episodes,
+    steps_per_episode,
+    seed=0,
+    position_margin=0.2,
+    velocity_fraction=0.05,
+    final_feedback_gain=10.0,
+):
+    """Train across random legal initial states with feedback annealing."""
+    rng = np.random.default_rng(seed)
+    teacher = experiment.teacher
+
+    lower = teacher.lower
+    upper = teacher.upper
+    span = upper - lower
+    q_low = lower + position_margin * span
+    q_high = upper - position_margin * span
+    qdot_scale = velocity_fraction * np.maximum(teacher.velocity, 1e-6)
+
+    initial_feedback_gain = float(net.feedback_gain)
+    episode_rmse = np.empty(n_episodes)
+
+    for episode in range(n_episodes):
+        if n_episodes == 1:
+            fraction = 1.0
+        else:
+            fraction = episode / (n_episodes - 1)
+        net.feedback_gain = (
+            (1.0 - fraction) * initial_feedback_gain
+            + fraction * final_feedback_gain
+        )
+
+        q0 = rng.uniform(q_low, q_high)
+        qdot0 = rng.uniform(-qdot_scale, qdot_scale)
+        experiment.reset(q0, qdot0)
+        net.reset()
+
+        error = train_steps(
+            experiment,
+            normalizer,
+            net,
+            steps_per_episode,
+        )
+        episode_rmse[episode] = np.sqrt(np.mean(error**2))
+
+    net.feedback_gain = initial_feedback_gain
+    return episode_rmse
+
+
+def evaluate_unseen_episode(
+    experiment,
+    normalizer,
+    net,
+    *,
+    n_steps,
+    sync_steps=200,
+    seed=1,
+    position_margin=0.2,
+):
+    """Evaluate k=0 on an unseen initial state after a short state-sync period.
+
+    The sync period uses teacher error feedback with learning disabled only to
+    initialize the network's represented state. Metrics are computed strictly
+    after feedback is removed.
+    """
+    rng = np.random.default_rng(seed)
+    teacher = experiment.teacher
+
+    span = teacher.upper - teacher.lower
+    q0 = rng.uniform(
+        teacher.lower + position_margin * span,
+        teacher.upper - position_margin * span,
+    )
+    qdot0 = np.zeros(teacher.n_dof)
+
+    experiment.reset(q0, qdot0)
+    net.reset()
+
+    feedback = net.feedback_gain
+    try:
+        for _ in range(sync_steps):
+            x, c = experiment.step()
+            x_n = normalizer.encode_state(x)
+            c_n = normalizer.encode_command(c)
+            net.step(c_n, x_n, learn=False)
+
+        net.feedback_gain = 0.0
+
+        targets = np.empty((n_steps, experiment.state_dim))
+        estimates = np.empty_like(targets)
+
+        for i in range(n_steps):
+            x, c = experiment.step()
+            x_n = normalizer.encode_state(x)
+            c_n = normalizer.encode_command(c)
+            x_hat = net.step(c_n, target_state=None, learn=False)
+            targets[i] = x_n
+            estimates[i] = x_hat
+    finally:
+        net.feedback_gain = feedback
+
+    error = targets - estimates
+    n = teacher.n_dof
+    return {
+        "rmse": float(np.sqrt(np.mean(error**2))),
+        "q_rmse": float(np.sqrt(np.mean(error[:, :n]**2))),
+        "qdot_rmse": float(np.sqrt(np.mean(error[:, n:2*n]**2))),
+        "tau_rmse": float(np.sqrt(np.mean(error[:, 2*n:]**2))),
+        "targets": targets,
+        "estimates": estimates,
+    }
