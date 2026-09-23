@@ -108,8 +108,9 @@ def run_bistable_trials(
         lam=20.0,
         mu=1e-3,
         nu=1e-3,
-        eta=0.1,
+        eta=0.2,
         feedback_gain=40.0,
+        decoder_scale=0.05,
         basis_mode="decoded",
         seed=seed,
     )
@@ -117,7 +118,7 @@ def run_bistable_trials(
     train_error = []
     train_spikes = 0.0
     beta = 8.0
-    sigma = 2.0
+    sigma = 6.0
 
     for trial in range(train_trials):
         teacher.reset(rng.uniform(-0.05, 0.05))
