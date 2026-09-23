@@ -142,6 +142,48 @@ jobs:
                   teacher.close()
           PY
 
+      - name: Report autonomous arm error by horizon
+        run: |
+          python - <<'PY'
+          from esbn_icub.arm_learning import (
+              build_arm_experiment,
+              evaluate_unseen_episode,
+              train_episodes,
+          )
+
+          teacher, experiment, normalizer, net = build_arm_experiment(
+              dt=1e-3,
+              n_neurons=128,
+              seed=0,
+              torque_fraction=0.10,
+              noise_std=0.5,
+              eta=0.5,
+              feedback_gain=40.0,
+              decoder_scale=0.05,
+          )
+          try:
+              train_episodes(
+                  experiment,
+                  normalizer,
+                  net,
+                  n_episodes=8,
+                  steps_per_episode=1000,
+                  seed=0,
+                  final_feedback_gain=10.0,
+              )
+              result = evaluate_unseen_episode(
+                  experiment,
+                  normalizer,
+                  net,
+                  n_steps=1000,
+                  sync_steps=300,
+                  seed=321,
+              )
+              print("ARM_HORIZONS", result["horizon_rmse"])
+          finally:
+              teacher.close()
+          PY
+
       - name: Report short arm-learning metric
         run: |
           python - <<'PY'
