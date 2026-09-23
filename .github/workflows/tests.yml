@@ -44,22 +44,44 @@ jobs:
         run: |
           python - <<'PY'
           import numpy as np
-          from esbn_icub.arm_learning import build_arm_experiment, train_steps, autonomous_steps
+          from esbn_icub.arm_learning import (
+              build_arm_experiment,
+              evaluate_unseen_episode,
+              train_episodes,
+          )
 
           teacher, experiment, normalizer, net = build_arm_experiment(
               dt=1e-3,
               n_neurons=128,
               seed=0,
-              torque_fraction=0.02,
-              noise_std=0.1,
+              torque_fraction=0.10,
+              noise_std=0.5,
           )
           try:
-              experiment.reset()
-              train = train_steps(experiment, normalizer, net, 20000)
-              result = autonomous_steps(experiment, normalizer, net, 2000)
+              episodes = train_episodes(
+                  experiment,
+                  normalizer,
+                  net,
+                  n_episodes=20,
+                  steps_per_episode=2000,
+                  seed=0,
+                  final_feedback_gain=10.0,
+              )
+              result = evaluate_unseen_episode(
+                  experiment,
+                  normalizer,
+                  net,
+                  n_steps=2000,
+                  sync_steps=300,
+                  seed=123,
+              )
               print({
-                  "train_tail_rmse": float(np.mean(train[-2000:])),
+                  "first_episode_rmse": float(episodes[0]),
+                  "last_episode_rmse": float(episodes[-1]),
                   "autonomous_rmse": result["rmse"],
+                  "q_rmse": result["q_rmse"],
+                  "qdot_rmse": result["qdot_rmse"],
+                  "tau_rmse": result["tau_rmse"],
                   "slow_weight_norm": float(np.linalg.norm(net.W_slow)),
               })
           finally:
