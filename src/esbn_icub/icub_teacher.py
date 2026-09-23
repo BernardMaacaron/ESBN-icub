@@ -31,72 +31,93 @@ RIGHT_ARM_JOINTS = (
 
 
 def _resolved_genova11_urdf():
-    """Resolve package paths and zero-mass fixed auxiliary links for Bullet.
+    """Build a reduced, exact right-arm URDF from iCubGenova11.
 
-    The official model contains many massless sensor/skin/frame links with no
-    inertial element. URDF semantics permit these fixed auxiliary links, but
-    PyBullet otherwise assigns them a default mass/inertia, which would corrupt
-    the robot dynamics. We explicitly give only such fixed auxiliary links zero
-    mass and reject any movable link that lacks inertial data.
+    Loading the complete iCubGenova11 URDF into PyBullet exposes hundreds of
+    auxiliary fixed sensor/skin joints. Besides being unnecessary for this
+    experiment, some PyBullet builds fail state queries on that very large
+    imported tree. For the arm-identification experiment we instead retain
+    exactly the physical serial chain from the parent of r_shoulder_pitch to
+    the child of r_wrist_yaw. All link inertias, joint origins, axes, limits
+    and damping on that chain are copied unchanged from the official model.
+    The chain base is fixed by loadURDF(useFixedBase=True).
     """
     if icub_models is None:
         raise ImportError("icub-models is required for the robot teacher")
 
     model_path = Path(icub_models.get_model_file("iCubGenova11"))
     models_path = Path(icub_models.get_models_path())
+    source = ET.parse(model_path).getroot()
 
-    tree = ET.parse(model_path)
-    root = tree.getroot()
+    joints = {j.attrib["name"]: j for j in source.findall("joint")}
+    missing = [name for name in RIGHT_ARM_JOINTS if name not in joints]
+    if missing:
+        raise RuntimeError(f"Missing expected Genova11 joints: {missing}")
 
     joint_by_child = {}
-    for joint in root.findall("joint"):
+    for joint in source.findall("joint"):
         child = joint.find("child")
         if child is not None:
             joint_by_child[child.attrib["link"]] = joint
 
-    for link in root.findall("link"):
-        if link.find("inertial") is not None:
-            continue
+    first = joints[RIGHT_ARM_JOINTS[0]]
+    last = joints[RIGHT_ARM_JOINTS[-1]]
+    base_link = first.find("parent").attrib["link"]
+    end_link = last.find("child").attrib["link"]
 
-        name = link.attrib["name"]
-        parent_joint = joint_by_child.get(name)
-
-        # The root is fixed by p.loadURDF(useFixedBase=True), so its inertial
-        # data is irrelevant; all other inertial-less links must be fixed
-        # auxiliaries or the model is unsafe for a dynamics experiment.
-        if parent_joint is not None and parent_joint.attrib.get("type") != "fixed":
+    # Trace the physical ancestry of the wrist back to the shoulder base.
+    chain_joints = []
+    chain_links = [end_link]
+    current = end_link
+    while current != base_link:
+        joint = joint_by_child.get(current)
+        if joint is None:
             raise RuntimeError(
-                f"Movable link {name} has no inertial data in iCubGenova11"
+                f"Could not trace Genova11 arm chain from {end_link} to {base_link}"
+            )
+        chain_joints.append(joint)
+        current = joint.find("parent").attrib["link"]
+        chain_links.append(current)
+
+    chain_joints.reverse()
+    chain_links.reverse()
+
+    found_active = [j.attrib["name"] for j in chain_joints if j.attrib["name"] in RIGHT_ARM_JOINTS]
+    if tuple(found_active) != RIGHT_ARM_JOINTS:
+        raise RuntimeError(
+            f"Unexpected Genova11 right-arm chain order: {found_active}"
+        )
+
+    source_links = {link.attrib["name"]: link for link in source.findall("link")}
+    reduced = ET.Element("robot", name="iCubGenova11_right_arm")
+
+    # Preserve top-level material declarations used by copied visuals.
+    for material in source.findall("material"):
+        reduced.append(ET.fromstring(ET.tostring(material)))
+
+    for i, link_name in enumerate(chain_links):
+        link = source_links[link_name]
+        if i > 0 and link.find("inertial") is None:
+            raise RuntimeError(
+                f"Movable arm-chain link {link_name} has no inertial data"
+            )
+        reduced.append(ET.fromstring(ET.tostring(link)))
+        if i < len(chain_joints):
+            reduced.append(ET.fromstring(ET.tostring(chain_joints[i])))
+
+    # Resolve installed package asset paths for PyBullet.
+    for mesh in reduced.iter("mesh"):
+        filename = mesh.attrib.get("filename", "")
+        if filename.startswith("package://iCub/"):
+            mesh.attrib["filename"] = filename.replace(
+                "package://iCub/",
+                f"{models_path.parent.as_posix()}/",
+                1,
             )
 
-        inertial = ET.Element("inertial")
-        ET.SubElement(inertial, "origin", xyz="0 0 0", rpy="0 0 0")
-        ET.SubElement(inertial, "mass", value="0")
-        ET.SubElement(
-            inertial,
-            "inertia",
-            ixx="0",
-            ixy="0",
-            ixz="0",
-            iyy="0",
-            iyz="0",
-            izz="0",
-        )
-        link.insert(0, inertial)
-
-    for elem in root.iter():
-        mesh = elem.find("mesh")
-        if mesh is not None:
-            filename = mesh.attrib.get("filename", "")
-            if filename.startswith("package://iCub/"):
-                mesh.attrib["filename"] = filename.replace(
-                    "package://iCub/",
-                    f"{models_path.parent.as_posix()}/",
-                    1,
-                )
-
+    tree = ET.ElementTree(reduced)
     tmp = tempfile.NamedTemporaryFile(
-        mode="wb", suffix=".urdf", prefix="icub_genova11_", delete=False
+        mode="wb", suffix=".urdf", prefix="icub_genova11_right_arm_", delete=False
     )
     tree.write(tmp, encoding="utf-8", xml_declaration=True)
     tmp.close()
@@ -226,18 +247,13 @@ class ICubTeacher:
         )
 
     def state(self):
-        # The Genova11 URDF contains many auxiliary fixed joints. On some
-        # PyBullet builds getJointState/getJointStates fail on this imported
-        # model even for scalar revolute joints, while the MultiDof API works
-        # consistently. Each active joint is revolute, hence one position and
-        # one velocity component are expected.
-        states = [
-            p.getJointStateMultiDof(self.body, jid, physicsClientId=self.client)
-            for jid in self.active_joint_ids
-        ]
-        q = np.array([state[0][0] for state in states], dtype=float)
-        qdot = np.array([state[1][0] for state in states], dtype=float)
+        states = p.getJointStates(
+            self.body, self.active_joint_ids, physicsClientId=self.client
+        )
+        q = np.array([state[0] for state in states], dtype=float)
+        qdot = np.array([state[1] for state in states], dtype=float)
         return q, qdot
+
 
     def set_torque(self, tau):
         tau = np.asarray(tau, dtype=float)
