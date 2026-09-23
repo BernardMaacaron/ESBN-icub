@@ -27,6 +27,8 @@ jobs:
               seed=0,
           )
           print({k: v for k, v in r.items() if not k.endswith("_trace")})
+          assert r["test_rmse"] < 0.15
+          assert r["final_attractor_error"] < 0.10
           PY
 
   robot:
@@ -53,10 +55,10 @@ jobs:
           )
           try:
               experiment.reset()
-              train = train_steps(experiment, normalizer, net, 2000)
-              result = autonomous_steps(experiment, normalizer, net, 500)
+              train = train_steps(experiment, normalizer, net, 20000)
+              result = autonomous_steps(experiment, normalizer, net, 2000)
               print({
-                  "train_tail_rmse": float(np.mean(train[-500:])),
+                  "train_tail_rmse": float(np.mean(train[-2000:])),
                   "autonomous_rmse": result["rmse"],
                   "slow_weight_norm": float(np.linalg.norm(net.W_slow)),
               })
