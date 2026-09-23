@@ -84,8 +84,16 @@ def autonomous_steps(experiment, normalizer, net, n_steps):
     finally:
         net.feedback_gain = feedback
 
+    error = targets - estimates
+    horizons = {}
+    for horizon in (50, 100, 250, 500, 1000):
+        if horizon <= n_steps:
+            prefix = error[:horizon]
+            horizons[horizon] = float(np.sqrt(np.mean(prefix**2)))
+
     return {
-        "rmse": float(np.sqrt(np.mean((targets - estimates) ** 2))),
+        "rmse": float(np.sqrt(np.mean(error ** 2))),
+        "horizon_rmse": horizons,
         "step_rmse": errors,
         "targets": targets,
         "estimates": estimates,
