@@ -177,13 +177,16 @@ def evaluate_unseen_episode(
 
     feedback = net.feedback_gain
     sync_error = np.empty(sync_steps)
+    sync_component_error = np.empty((sync_steps, experiment.state_dim))
     try:
         for i in range(sync_steps):
             x, c = experiment.step()
             x_n = normalizer.encode_state(x)
             c_n = normalizer.encode_command(c)
             x_hat = net.step(c_n, x_n, learn=False)
-            sync_error[i] = np.sqrt(np.mean((x_n - x_hat) ** 2))
+            delta = x_n - x_hat
+            sync_component_error[i] = delta
+            sync_error[i] = np.sqrt(np.mean(delta ** 2))
 
         net.feedback_gain = 0.0
 
@@ -201,12 +204,18 @@ def evaluate_unseen_episode(
         net.feedback_gain = feedback
 
     error = targets - estimates
+    step_rmse = np.sqrt(np.mean(error**2, axis=1))
     n = teacher.n_dof
+    sync_tail = sync_component_error[-min(50, sync_steps):]
     return {
-        "sync_rmse": float(
-            np.mean(sync_error[-min(50, sync_steps):])
-        ),
+        "sync_rmse": float(np.sqrt(np.mean(sync_tail**2))),
+        "sync_q_rmse": float(np.sqrt(np.mean(sync_tail[:, :n]**2))),
+        "sync_qdot_rmse": float(np.sqrt(np.mean(sync_tail[:, n:2*n]**2))),
+        "sync_tau_rmse": float(np.sqrt(np.mean(sync_tail[:, 2*n:]**2))),
         "rmse": float(np.sqrt(np.mean(error**2))),
+        "early_rmse": float(np.sqrt(np.mean(error[:min(100, n_steps)]**2))),
+        "late_rmse": float(np.sqrt(np.mean(error[-min(100, n_steps):]**2))),
+        "step_rmse": step_rmse,
         "q_rmse": float(np.sqrt(np.mean(error[:, :n]**2))),
         "qdot_rmse": float(np.sqrt(np.mean(error[:, n:2*n]**2))),
         "tau_rmse": float(np.sqrt(np.mean(error[:, 2*n:]**2))),
