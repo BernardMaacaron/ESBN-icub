@@ -13,7 +13,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[test]"
-      - run: pytest -q tests/test_alemi_ebn.py tests/test_excitation.py
+      - run: pytest -q tests/test_alemi_ebn.py tests/test_excitation.py tests/test_nonlinear_teacher.py
 
   robot:
     runs-on: ubuntu-latest
