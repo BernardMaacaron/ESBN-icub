@@ -36,6 +36,7 @@ def run_bistable_demo(
     )
 
     train_error = []
+    spike_count = 0.0
     for t in range(train_steps):
         # Smooth persistent excitation plus a weak stochastic component.
         time = t * dt
@@ -46,6 +47,7 @@ def run_bistable_demo(
         ])
         target = teacher.step(command)
         estimate = net.step(command, target, learn=True)
+        spike_count += float(np.sum(net.spikes))
         train_error.append(float(target[0] - estimate[0]))
 
     net.feedback_gain = 0.0
@@ -60,6 +62,7 @@ def run_bistable_demo(
         ])
         target = teacher.step(command)
         estimate = net.step(command, target_state=None, learn=False)
+        spike_count += float(np.sum(net.spikes))
         target_trace[t] = target[0]
         estimate_trace[t] = estimate[0]
 
@@ -71,6 +74,8 @@ def run_bistable_demo(
         "test_rmse": float(np.sqrt(np.mean(test_error ** 2))),
         "target_trace": target_trace,
         "estimate_trace": estimate_trace,
-        "spike_rate_hz": float(np.mean(net.spikes) / dt),
+        "spike_rate_hz": float(
+            spike_count / (n_neurons * (train_steps + test_steps) * dt)
+        ),
         "slow_weight_norm": float(np.linalg.norm(net.W_slow)),
     }
