@@ -79,3 +79,118 @@ def run_bistable_demo(
         ),
         "slow_weight_norm": float(np.linalg.norm(net.W_slow)),
     }
+
+
+
+def run_bistable_trials(
+    *,
+    dt=1e-3,
+    train_trials=50,
+    train_trial_steps=1000,
+    command_steps=500,
+    test_steps=3000,
+    n_neurons=50,
+    seed=0,
+):
+    """Paper-shaped bistable experiment with repeated random-input trials.
+
+    Alemi et al. use N=50 neurons and repeated learning iterations. Each
+    training trial here begins near the unstable fixed point, is driven by a
+    smooth random command, and keeps learning while the command is removed.
+    The test trial uses an unseen command with feedback and learning disabled.
+    """
+    rng = np.random.default_rng(seed)
+    teacher = BistableTeacher(dt=dt)
+    net = AlemiEBN(
+        state_dim=1,
+        n_neurons=n_neurons,
+        dt=dt,
+        lam=20.0,
+        mu=1e-3,
+        nu=1e-3,
+        eta=0.1,
+        feedback_gain=40.0,
+        basis_mode="decoded",
+        seed=seed,
+    )
+
+    train_error = []
+    train_spikes = 0.0
+    beta = 8.0
+    sigma = 2.0
+
+    for trial in range(train_trials):
+        teacher.reset(rng.uniform(-0.05, 0.05))
+        net.reset()
+        command_value = 0.0
+
+        for t in range(train_trial_steps):
+            if t < command_steps:
+                command_value += (
+                    -beta * command_value * dt
+                    + sigma * np.sqrt(dt) * rng.normal()
+                )
+            else:
+                command_value = 0.0
+
+            command = np.array([command_value])
+            target = teacher.step(command)
+            estimate = net.step(command, target, learn=True)
+
+            train_spikes += float(np.sum(net.spikes))
+            train_error.append(float(target[0] - estimate[0]))
+
+    # Unseen trial: no error feedback and no plasticity.
+    teacher.reset(rng.uniform(-0.05, 0.05))
+    net.reset()
+    net.feedback_gain = 0.0
+    command_value = 0.0
+
+    target_trace = np.empty(test_steps)
+    estimate_trace = np.empty(test_steps)
+    command_trace = np.empty(test_steps)
+    test_spikes = 0.0
+
+    for t in range(test_steps):
+        if t < command_steps:
+            command_value += (
+                -beta * command_value * dt
+                + sigma * np.sqrt(dt) * rng.normal()
+            )
+        else:
+            command_value = 0.0
+
+        command = np.array([command_value])
+        target = teacher.step(command)
+        estimate = net.step(command, target_state=None, learn=False)
+
+        target_trace[t] = target[0]
+        estimate_trace[t] = estimate[0]
+        command_trace[t] = command_value
+        test_spikes += float(np.sum(net.spikes))
+
+    train_error = np.asarray(train_error)
+    test_error = target_trace - estimate_trace
+
+    return {
+        "train_rmse_tail": float(
+            np.sqrt(np.mean(train_error[-train_trial_steps:] ** 2))
+        ),
+        "test_rmse": float(np.sqrt(np.mean(test_error ** 2))),
+        "final_target": float(target_trace[-1]),
+        "final_estimate": float(estimate_trace[-1]),
+        "final_attractor_error": float(
+            abs(abs(estimate_trace[-1]) - 0.5)
+        ),
+        "train_rate_hz": float(
+            train_spikes
+            / (n_neurons * train_trials * train_trial_steps * dt)
+        ),
+        "test_rate_hz": float(
+            test_spikes / (n_neurons * test_steps * dt)
+        ),
+        "slow_weight_norm": float(np.linalg.norm(net.W_slow)),
+        "target_trace": target_trace,
+        "estimate_trace": estimate_trace,
+        "command_trace": command_trace,
+    }
