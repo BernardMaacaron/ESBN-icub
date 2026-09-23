@@ -226,14 +226,17 @@ class ICubTeacher:
         )
 
     def state(self):
-        # PyBullet's batched getJointStates is unreliable for this large URDF
-        # on some builds; scalar queries are robust for the seven active DOFs.
+        # The Genova11 URDF contains many auxiliary fixed joints. On some
+        # PyBullet builds getJointState/getJointStates fail on this imported
+        # model even for scalar revolute joints, while the MultiDof API works
+        # consistently. Each active joint is revolute, hence one position and
+        # one velocity component are expected.
         states = [
-            p.getJointState(self.body, jid, physicsClientId=self.client)
+            p.getJointStateMultiDof(self.body, jid, physicsClientId=self.client)
             for jid in self.active_joint_ids
         ]
-        q = np.array([state[0] for state in states])
-        qdot = np.array([state[1] for state in states])
+        q = np.array([state[0][0] for state in states], dtype=float)
+        qdot = np.array([state[1][0] for state in states], dtype=float)
         return q, qdot
 
     def set_torque(self, tau):
