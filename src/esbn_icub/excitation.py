@@ -43,7 +43,9 @@ class FilteredTorque:
         self.target_xi = np.zeros_like(self.limits)
         self.step_index = 0
 
-    def reset(self):
+    def reset(self, *, seed=None):
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
         self.tau.fill(0.0)
         self.xi.fill(0.0)
         self.target_xi.fill(0.0)
