@@ -17,6 +17,9 @@ def build_arm_experiment(
     seed=0,
     torque_fraction=0.1,
     noise_std=1.0,
+    eta=0.05,
+    feedback_gain=40.0,
+    decoder_scale=None,
 ):
     """Construct teacher, normalized experiment stream, and Alemi network."""
     teacher = ICubTeacher(dt=dt, gui=False)
@@ -39,8 +42,9 @@ def build_arm_experiment(
         state_dim=experiment.state_dim,
         n_neurons=n_neurons,
         dt=dt,
-        feedback_gain=40.0,
-        eta=0.05,
+        feedback_gain=feedback_gain,
+        eta=eta,
+        decoder_scale=decoder_scale,
         seed=seed,
     )
     return teacher, experiment, normalizer, net
