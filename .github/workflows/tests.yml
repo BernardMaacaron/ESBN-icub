@@ -179,6 +179,12 @@ jobs:
                   sync_steps=300,
                   seed=321,
               )
+              print("ARM_SYNC", {
+                  "rmse": result["sync_rmse"],
+                  "q_rmse": result["sync_q_rmse"],
+                  "qdot_rmse": result["sync_qdot_rmse"],
+                  "tau_rmse": result["sync_tau_rmse"],
+              })
               print("ARM_HORIZONS", result["horizon_rmse"])
           finally:
               teacher.close()
