@@ -141,26 +141,21 @@ def run_bistable_trials(
             train_spikes += float(np.sum(net.spikes))
             train_error.append(float(target[0] - estimate[0]))
 
-    # Unseen trial: no error feedback and no plasticity.
-    teacher.reset(rng.uniform(-0.05, 0.05))
+    # Autonomous probe: a deterministic command pulse pushes both systems
+    # away from the unstable origin; after the pulse, the learned recurrent
+    # dynamics alone must hold the corresponding +/-0.5 attractor.
+    teacher.reset(0.0)
     net.reset()
     net.feedback_gain = 0.0
-    command_value = 0.0
 
     target_trace = np.empty(test_steps)
     estimate_trace = np.empty(test_steps)
     command_trace = np.empty(test_steps)
     test_spikes = 0.0
+    pulse = 1.5
 
     for t in range(test_steps):
-        if t < command_steps:
-            command_value += (
-                -beta * command_value * dt
-                + sigma * np.sqrt(dt) * rng.normal()
-            )
-        else:
-            command_value = 0.0
-
+        command_value = pulse if t < command_steps else 0.0
         command = np.array([command_value])
         target = teacher.step(command)
         estimate = net.step(command, target_state=None, learn=False)
