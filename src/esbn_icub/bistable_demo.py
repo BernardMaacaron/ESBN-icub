@@ -1,0 +1,76 @@
+"""Standalone nonlinear-system experiment for validating the Alemi EBN."""
+
+from __future__ import annotations
+
+import numpy as np
+
+from .alemi_ebn import AlemiEBN
+from .nonlinear_teacher import BistableTeacher
+
+
+def run_bistable_demo(
+    *,
+    dt=1e-3,
+    train_steps=5000,
+    test_steps=2000,
+    n_neurons=64,
+    seed=0,
+):
+    """Train on a driven bistable system, then evaluate with feedback disabled.
+
+    Returns compact numerical diagnostics rather than plotting so the same
+    experiment can be exercised in CI and notebooks.
+    """
+    rng = np.random.default_rng(seed)
+    teacher = BistableTeacher(dt=dt, x0=0.2)
+    net = AlemiEBN(
+        state_dim=1,
+        n_neurons=n_neurons,
+        dt=dt,
+        lam=20.0,
+        mu=1e-3,
+        nu=1e-3,
+        eta=0.5,
+        feedback_gain=40.0,
+        seed=seed,
+    )
+
+    train_error = []
+    for t in range(train_steps):
+        # Smooth persistent excitation plus a weak stochastic component.
+        time = t * dt
+        command = np.array([
+            0.8 * np.sin(2.0 * np.pi * 0.7 * time)
+            + 0.25 * np.sin(2.0 * np.pi * 1.9 * time)
+            + 0.05 * rng.normal()
+        ])
+        target = teacher.step(command)
+        estimate = net.step(command, target, learn=True)
+        train_error.append(float(target[0] - estimate[0]))
+
+    net.feedback_gain = 0.0
+
+    target_trace = np.empty(test_steps)
+    estimate_trace = np.empty(test_steps)
+    for t in range(test_steps):
+        time = (train_steps + t) * dt
+        command = np.array([
+            0.7 * np.sin(2.0 * np.pi * 0.9 * time)
+            + 0.20 * np.sin(2.0 * np.pi * 2.3 * time)
+        ])
+        target = teacher.step(command)
+        estimate = net.step(command, target_state=None, learn=False)
+        target_trace[t] = target[0]
+        estimate_trace[t] = estimate[0]
+
+    train_error = np.asarray(train_error)
+    test_error = target_trace - estimate_trace
+
+    return {
+        "train_rmse_tail": float(np.sqrt(np.mean(train_error[-1000:] ** 2))),
+        "test_rmse": float(np.sqrt(np.mean(test_error ** 2))),
+        "target_trace": target_trace,
+        "estimate_trace": estimate_trace,
+        "spike_rate_hz": float(np.mean(net.spikes) / dt),
+        "slow_weight_norm": float(np.linalg.norm(net.W_slow)),
+    }
