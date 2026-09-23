@@ -79,9 +79,9 @@ The network receives only the additive command and teacher state during training
 - [x] Automated symmetry/positive-definiteness mass-matrix test written.
 - [x] Configuration-dependent mass-matrix test written.
 - [x] Inverse-dynamics identity test written.
-- [ ] Run and pass the robot test suite in CI.
-- [ ] Add random-configuration sweep.
-- [ ] Add zero-torque gravity diagnostic.
+- [x] Run and pass the robot test suite in CI.
+- [x] Add random-configuration sweep.
+- [x] Add gravity-term configuration diagnostic.
 - [ ] Add same-torque/different-configuration diagnostic plot.
 - [ ] Add notebooks/01_validate_icub_dynamics.ipynb.
 - [ ] Add independent iDynTree comparison.
@@ -95,8 +95,8 @@ The network receives only the additive command and teacher state during training
 - [x] Error feedback implemented.
 - [x] Local W_slow update implemented.
 - [x] Unit tests for dimensions and local update written.
-- [ ] Reproduce a simple nonlinear teacher-system learning experiment.
-- [ ] Verify k=0 autonomous test behavior.
+- [x] Reproduce a simple nonlinear bistable teacher-system learning experiment.
+- [x] Verify k=0 autonomous bistable behavior.
 - [ ] Add firing-rate and raster diagnostics.
 
 ### Phase 5 — robot/Alemi formulation
@@ -105,17 +105,23 @@ The network receives only the additive command and teacher state during training
 - [x] RobotExperiment streams x=[q,qdot,tau].
 - [x] Additive command c=[0,0,xi] implemented.
 - [x] 7-DOF state dimension is derived as K=21.
-- [ ] Add fixed physical normalization scales.
-- [ ] Generate train/test excitation trajectories with separate seeds.
-- [ ] Add broad initial-configuration sampling.
+- [x] Add fixed physical normalization scales.
+- [x] Generate train/test excitation trajectories with separate seeds.
+- [x] Add broad initial-configuration sampling.
 
 ### Phase 6 — arm learning smoke test
 
-- [ ] Train the Alemi EBN on the 7-DOF arm.
-- [ ] Anneal teacher feedback gain.
-- [ ] Evaluate with k=0.
-- [ ] Test unseen initial configurations.
-- [ ] Test unseen torque sequences.
+Current status: the harness is operational and CI is green, but long autonomous
+rollouts still drift substantially in joint position. This phase is therefore
+implemented but not yet considered successful. The next diagnostics separate
+short-horizon vector-field accuracy from long-horizon accumulation.
+
+
+- [x] Train the Alemi EBN on the 7-DOF arm.
+- [x] Anneal teacher feedback gain.
+- [x] Evaluate with k=0.
+- [x] Test unseen initial configurations.
+- [x] Test unseen torque sequences with disjoint excitation seeds.
 - [ ] Plot per-joint q and qdot errors.
 
 ### Phase 7 — arm + hand
