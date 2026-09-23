@@ -107,9 +107,17 @@ class AlemiEBN:
         )
         self.u += self.dt * drive
 
-        self.spikes = (self.u > self.threshold).astype(float)
-        if np.any(self.spikes):
-            self.u -= self.W_fast @ self.spikes
+        # Greedy EBN spike selection: emit one spike, apply the fast
+        # recurrent reset/inhibition immediately, then re-evaluate. This is
+        # the discrete event analogue of the -W_fast s impulse term.
+        self.spikes.fill(0.0)
+        for _ in range(2 * self.n_neurons):
+            excess = self.u - self.threshold
+            i = int(np.argmax(excess))
+            if excess[i] <= 0.0:
+                break
+            self.spikes[i] += 1.0
+            self.u -= self.W_fast[:, i]
 
         self.r += self.dt * (-self.lam * self.r)
         self.r += self.spikes
