@@ -34,13 +34,13 @@ class RobotExperiment:
     def state_dim(self):
         return 3 * self.teacher.n_dof
 
-    def reset(self, q=None, qdot=None):
+    def reset(self, q=None, qdot=None, *, excitation_seed=None):
         if q is None:
             q = 0.5 * (self.teacher.lower + self.teacher.upper)
         if qdot is None:
             qdot = np.zeros(self.teacher.n_dof)
         self.teacher.reset(q, qdot)
-        self.excitation.reset()
+        self.excitation.reset(seed=excitation_seed)
         return self.state()
 
     def state(self):
