@@ -17,8 +17,15 @@ jobs:
       - name: Report bistable autonomous metric
         run: |
           python - <<'PY'
-          from esbn_icub.bistable_demo import run_bistable_demo
-          r = run_bistable_demo(train_steps=5000, test_steps=2000, n_neurons=64, seed=0)
+          from esbn_icub.bistable_demo import run_bistable_trials
+          r = run_bistable_trials(
+              train_trials=30,
+              train_trial_steps=1000,
+              command_steps=500,
+              test_steps=3000,
+              n_neurons=50,
+              seed=0,
+          )
           print({k: v for k, v in r.items() if not k.endswith("_trace")})
           PY
 
