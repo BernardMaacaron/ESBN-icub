@@ -18,6 +18,7 @@ class AlemiEBN:
         nu=1e-3,
         eta=1e-3,
         feedback_gain=10.0,
+        decoder_scale=None,
         seed=0,
     ):
         self.state_dim = state_dim
@@ -30,8 +31,13 @@ class AlemiEBN:
         self.feedback_gain = feedback_gain
 
         rng = np.random.default_rng(seed)
-        self.D = rng.normal(size=(state_dim, n_neurons))
-        self.D /= np.linalg.norm(self.D, axis=0, keepdims=True) + 1e-12
+        if decoder_scale is None:
+            decoder_scale = 1.0 / np.sqrt(n_neurons)
+        self.decoder_scale = float(decoder_scale)
+        self.D = rng.normal(
+            scale=self.decoder_scale,
+            size=(state_dim, n_neurons),
+        )
 
         self.W_fast = self.D.T @ self.D + mu * np.eye(n_neurons)
         self.M = rng.normal(scale=1.0 / np.sqrt(n_neurons), size=(n_neurons, n_neurons))
