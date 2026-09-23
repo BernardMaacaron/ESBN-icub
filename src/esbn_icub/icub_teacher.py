@@ -185,6 +185,10 @@ class ICubTeacher:
             p.getJointInfo(self.body, jid, physicsClientId=self.client)[10]
             for jid in self.active_joint_ids
         ])
+        self.velocity = np.array([
+            p.getJointInfo(self.body, jid, physicsClientId=self.client)[11]
+            for jid in self.active_joint_ids
+        ])
 
         self._held_positions = {}
         self.reset(np.zeros(self.n_dof), np.zeros(self.n_dof))
