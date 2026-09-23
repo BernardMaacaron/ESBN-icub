@@ -38,3 +38,28 @@ jobs:
           python-version: "3.11"
       - run: pip install -e ".[test,robot]"
       - run: pytest -q tests/test_icub_teacher.py tests/test_robot_experiment.py tests/test_arm_learning.py
+      - name: Report short arm-learning metric
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from esbn_icub.arm_learning import build_arm_experiment, train_steps, autonomous_steps
+
+          teacher, experiment, normalizer, net = build_arm_experiment(
+              dt=1e-3,
+              n_neurons=128,
+              seed=0,
+              torque_fraction=0.02,
+              noise_std=0.1,
+          )
+          try:
+              experiment.reset()
+              train = train_steps(experiment, normalizer, net, 2000)
+              result = autonomous_steps(experiment, normalizer, net, 500)
+              print({
+                  "train_tail_rmse": float(np.mean(train[-500:])),
+                  "autonomous_rmse": result["rmse"],
+                  "slow_weight_norm": float(np.linalg.norm(net.W_slow)),
+              })
+          finally:
+              teacher.close()
+          PY
