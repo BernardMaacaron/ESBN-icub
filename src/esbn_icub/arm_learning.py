@@ -172,12 +172,14 @@ def evaluate_unseen_episode(
     net.reset()
 
     feedback = net.feedback_gain
+    sync_error = np.empty(sync_steps)
     try:
-        for _ in range(sync_steps):
+        for i in range(sync_steps):
             x, c = experiment.step()
             x_n = normalizer.encode_state(x)
             c_n = normalizer.encode_command(c)
-            net.step(c_n, x_n, learn=False)
+            x_hat = net.step(c_n, x_n, learn=False)
+            sync_error[i] = np.sqrt(np.mean((x_n - x_hat) ** 2))
 
         net.feedback_gain = 0.0
 
@@ -197,6 +199,9 @@ def evaluate_unseen_episode(
     error = targets - estimates
     n = teacher.n_dof
     return {
+        "sync_rmse": float(
+            np.mean(sync_error[-min(50, sync_steps):])
+        ),
         "rmse": float(np.sqrt(np.mean(error**2))),
         "q_rmse": float(np.sqrt(np.mean(error[:, :n]**2))),
         "qdot_rmse": float(np.sqrt(np.mean(error[:, n:2*n]**2))),
