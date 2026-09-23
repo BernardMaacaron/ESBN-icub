@@ -86,7 +86,7 @@ def autonomous_steps(experiment, normalizer, net, n_steps):
 
     error = targets - estimates
     horizons = {}
-    for horizon in (50, 100, 250, 500, 1000):
+    for horizon in (1, 5, 10, 25, 50, 100, 250, 500, 1000):
         if horizon <= n_steps:
             prefix = error[:horizon]
             horizons[horizon] = float(np.sqrt(np.mean(prefix**2)))
