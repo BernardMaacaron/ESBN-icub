@@ -19,7 +19,7 @@ class AlemiEBN:
         eta=1e-3,
         feedback_gain=10.0,
         decoder_scale=None,
-        basis_mode="decoded",
+        basis_mode="random",
         seed=0,
     ):
         self.state_dim = state_dim
