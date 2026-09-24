@@ -28,3 +28,17 @@ def test_augmented_state_and_command_shapes():
         np.testing.assert_array_equal(c[:14], np.zeros(14))
     finally:
         teacher.close()
+
+
+def test_placeholder_effort_requires_explicit_torque_reference():
+    teacher = ICubTeacher(dt=1e-3, gui=False)
+    try:
+        with pytest.raises(ValueError, match="placeholder effort limits"):
+            RobotExperiment(
+                teacher,
+                noise_std=0.1,
+                torque_fraction=0.1,
+                seed=0,
+            )
+    finally:
+        teacher.close()
