@@ -21,6 +21,9 @@ class BistableTeacher:
         self.x = float(x0)
         return np.array([self.x])
 
+    def state(self):
+        return np.array([self.x])
+
     def step(self, command):
         c = float(np.asarray(command).reshape(-1)[0])
         self.x += self.dt * (self.x * (0.5 - self.x) * (0.5 + self.x) + c)
