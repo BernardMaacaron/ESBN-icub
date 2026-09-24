@@ -1,0 +1,240 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[test]"
+      - run: pytest -q tests/test_alemi_ebn.py tests/test_excitation.py tests/test_nonlinear_teacher.py tests/test_bistable_demo.py tests/test_normalization.py
+      - name: Report bistable autonomous metric
+        run: |
+          python - <<'PY'
+          from esbn_icub.bistable_demo import run_bistable_trials
+          r = run_bistable_trials(
+              train_trials=500,
+              train_trial_steps=1000,
+              command_steps=500,
+              test_steps=6000,
+              n_neurons=50,
+              seed=0,
+          )
+          print({k: v for k, v in r.items() if not k.endswith("_trace")})
+          assert r["test_rmse"] < 0.15
+          assert r["final_attractor_error"] < 0.10
+          PY
+
+  robot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[test,robot]"
+      - run: pytest -q tests/test_icub_teacher.py tests/test_robot_experiment.py tests/test_arm_learning.py
+      - name: Compare arm hyperparameters and untrained baseline
+        run: |
+          python - <<'PY'
+          from esbn_icub.arm_learning import (
+              evaluate_untrained_baseline,
+              sweep_arm_hyperparameters,
+          )
+
+          baseline = evaluate_untrained_baseline(
+              n_neurons=128,
+              seed=0,
+              torque_fraction=0.10,
+              noise_std=0.5,
+              n_steps=1000,
+              sync_steps=300,
+          )
+          print({
+              "baseline_sync_rmse": baseline["sync_rmse"],
+              "baseline_autonomous_rmse": baseline["rmse"],
+              "baseline_q_rmse": baseline["q_rmse"],
+          })
+
+          rows = sweep_arm_hyperparameters(
+              etas=(0.1, 0.5, 1.0, 2.0),
+              decoder_scales=(None, 0.05),
+              feedback_gains=(20.0, 40.0),
+              n_neurons=128,
+              n_episodes=8,
+              steps_per_episode=1000,
+              eval_steps=1000,
+              sync_steps=300,
+              torque_fraction=0.10,
+              noise_std=0.5,
+              seed=0,
+          )
+          rows.sort(key=lambda row: (row["sync_rmse"], row["autonomous_rmse"]))
+          print("ARM_SWEEP_BEST", rows[0])
+          print("ARM_SWEEP_TOP4")
+          for row in rows[:4]:
+              print(row)
+          PY
+
+      - name: Diagnose arm feedback annealing
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from esbn_icub.arm_learning import (
+              build_arm_experiment,
+              evaluate_unseen_episode,
+              train_episodes,
+          )
+
+          for final_gain in (40.0, 20.0, 10.0):
+              teacher, experiment, normalizer, net = build_arm_experiment(
+                  dt=1e-3,
+                  n_neurons=128,
+                  seed=0,
+                  torque_fraction=0.10,
+                  noise_std=0.5,
+                  eta=0.5,
+                  feedback_gain=40.0,
+                  decoder_scale=0.05,
+              )
+              try:
+                  episodes = train_episodes(
+                      experiment,
+                      normalizer,
+                      net,
+                      n_episodes=20,
+                      steps_per_episode=1000,
+                      seed=0,
+                      final_feedback_gain=final_gain,
+                  )
+                  result = evaluate_unseen_episode(
+                      experiment,
+                      normalizer,
+                      net,
+                      n_steps=1500,
+                      sync_steps=500,
+                      seed=123,
+                  )
+                  print({
+                      "final_training_feedback": final_gain,
+                      "median_last5_train_rmse": float(np.median(episodes[-5:])),
+                      "sync_rmse": result["sync_rmse"],
+                  "sync_q_rmse": result["sync_q_rmse"],
+                  "early_rmse": result["early_rmse"],
+                  "late_rmse": result["late_rmse"],
+                      "sync_q_rmse": result["sync_q_rmse"],
+                      "sync_qdot_rmse": result["sync_qdot_rmse"],
+                      "sync_tau_rmse": result["sync_tau_rmse"],
+                      "autonomous_rmse": result["rmse"],
+                      "early_rmse": result["early_rmse"],
+                      "late_rmse": result["late_rmse"],
+                      "q_rmse": result["q_rmse"],
+                      "qdot_rmse": result["qdot_rmse"],
+                      "tau_rmse": result["tau_rmse"],
+                  })
+              finally:
+                  teacher.close()
+          PY
+
+      - name: Report autonomous arm error by horizon
+        run: |
+          python - <<'PY'
+          from esbn_icub.arm_learning import (
+              build_arm_experiment,
+              evaluate_unseen_episode,
+              train_episodes,
+          )
+
+          teacher, experiment, normalizer, net = build_arm_experiment(
+              dt=1e-3,
+              n_neurons=128,
+              seed=0,
+              torque_fraction=0.10,
+              noise_std=0.5,
+              eta=0.5,
+              feedback_gain=40.0,
+              decoder_scale=0.05,
+          )
+          try:
+              train_episodes(
+                  experiment,
+                  normalizer,
+                  net,
+                  n_episodes=8,
+                  steps_per_episode=1000,
+                  seed=0,
+                  final_feedback_gain=10.0,
+              )
+              result = evaluate_unseen_episode(
+                  experiment,
+                  normalizer,
+                  net,
+                  n_steps=1000,
+                  sync_steps=300,
+                  seed=321,
+              )
+              print("ARM_SYNC", {
+                  "rmse": result["sync_rmse"],
+                  "q_rmse": result["sync_q_rmse"],
+                  "qdot_rmse": result["sync_qdot_rmse"],
+                  "tau_rmse": result["sync_tau_rmse"],
+              })
+              print("ARM_HORIZONS", result["horizon_rmse"])
+          finally:
+              teacher.close()
+          PY
+
+      - name: Report short arm-learning metric
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from esbn_icub.arm_learning import (
+              build_arm_experiment,
+              evaluate_unseen_episode,
+              train_episodes,
+          )
+
+          teacher, experiment, normalizer, net = build_arm_experiment(
+              dt=1e-3,
+              n_neurons=128,
+              seed=0,
+              torque_fraction=0.10,
+              noise_std=0.5,
+          )
+          try:
+              episodes = train_episodes(
+                  experiment,
+                  normalizer,
+                  net,
+                  n_episodes=20,
+                  steps_per_episode=2000,
+                  seed=0,
+                  final_feedback_gain=10.0,
+              )
+              result = evaluate_unseen_episode(
+                  experiment,
+                  normalizer,
+                  net,
+                  n_steps=2000,
+                  sync_steps=300,
+                  seed=123,
+              )
+              print({
+                  "first_episode_rmse": float(episodes[0]),
+                  "last_episode_rmse": float(episodes[-1]),
+                  "sync_rmse": result["sync_rmse"],
+                  "autonomous_rmse": result["rmse"],
+                  "q_rmse": result["q_rmse"],
+                  "qdot_rmse": result["qdot_rmse"],
+                  "tau_rmse": result["tau_rmse"],
+                  "slow_weight_norm": float(np.linalg.norm(net.W_slow)),
+              })
+          finally:
+              teacher.close()
+          PY

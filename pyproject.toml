@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esbn-icub"
+version = "0.1.0"
+description = "Alemi-style efficient balanced spiking networks learning iCub rigid-body dynamics"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26"]
+
+[project.optional-dependencies]
+robot = [
+    "pybullet>=3.2.6",
+    "icub-models @ git+https://github.com/robotology/icub-models.git@dca8c618c264be70ce285bad38040411725e3551",
+]
+test = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
