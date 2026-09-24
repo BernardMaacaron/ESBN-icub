@@ -30,7 +30,7 @@ def test_arm_learning_harness_runs():
         assert np.all(np.isfinite(train_error))
         assert np.isfinite(result["rmse"])
         assert result["targets"].shape == (3, 21)
-        assert result["horizon_rmse"] == {}
+        assert set(result["horizon_rmse"]) == {1}
         assert result["estimates"].shape == (3, 21)
     finally:
         teacher.close()
