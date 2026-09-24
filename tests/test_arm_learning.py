@@ -69,3 +69,22 @@ def test_episodic_training_and_unseen_evaluation_run():
         assert result["targets"].shape == (3, 21)
     finally:
         teacher.close()
+
+
+def test_arm_builder_ignores_placeholder_urdf_limits():
+    teacher, experiment, normalizer, net = build_arm_experiment(
+        dt=1e-3,
+        n_neurons=64,
+        seed=4,
+        torque_fraction=0.1,
+        noise_std=0.1,
+    )
+    try:
+        assert np.all(teacher.effort >= 1e3)
+        assert np.all(teacher.velocity >= 1e3)
+        assert np.all(experiment.torque_reference < teacher.effort)
+        assert np.all(normalizer.velocity_scale < teacher.velocity)
+        assert np.all(experiment.torque_limits > 0.0)
+        assert net.basis_mode == "random"
+    finally:
+        teacher.close()
