@@ -15,6 +15,7 @@ def test_augmented_state_and_command_shapes():
             teacher,
             noise_std=0.1,
             torque_fraction=0.01,
+            torque_reference=np.ones(teacher.n_dof),
             seed=0,
         )
         x0 = experiment.reset()
