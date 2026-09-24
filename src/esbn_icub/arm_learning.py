@@ -10,6 +10,54 @@ from .normalization import RobotStateNormalizer
 from .robot_experiment import RobotExperiment
 
 
+
+def estimate_characteristic_torque_scale(
+    teacher,
+    *,
+    seed=0,
+    n_configurations=16,
+    acceleration_scale=1.0,
+):
+    """Estimate a dynamics-based torque scale, not an actuator limit.
+
+    The physical iCub URDF ships placeholder effort/velocity limits (50000),
+    so those fields must not be used for normalization or excitation. This
+    scale is derived from the actual rigid-body model by sampling gravity and
+    unit-acceleration inverse dynamics over legal configurations.
+    """
+    rng = np.random.default_rng(seed)
+    span = teacher.upper - teacher.lower
+    q_low = teacher.lower + 0.2 * span
+    q_high = teacher.upper - 0.2 * span
+    zeros = np.zeros(teacher.n_dof)
+    scale = np.zeros(teacher.n_dof)
+
+    configurations = [0.5 * (teacher.lower + teacher.upper)]
+    configurations.extend(
+        rng.uniform(q_low, q_high) for _ in range(n_configurations)
+    )
+
+    for q in configurations:
+        scale = np.maximum(
+            scale,
+            np.abs(teacher.inverse_dynamics(q, zeros, zeros)),
+        )
+        for j in range(teacher.n_dof):
+            qddot = np.zeros(teacher.n_dof)
+            qddot[j] = acceleration_scale
+            scale = np.maximum(
+                scale,
+                np.abs(teacher.inverse_dynamics(q, zeros, qddot)),
+            )
+            qddot[j] = -acceleration_scale
+            scale = np.maximum(
+                scale,
+                np.abs(teacher.inverse_dynamics(q, zeros, qddot)),
+            )
+
+    return np.maximum(scale, 0.1)
+
+
 def build_arm_experiment(
     *,
     dt=1e-3,
@@ -20,17 +68,29 @@ def build_arm_experiment(
     eta=0.05,
     feedback_gain=40.0,
     decoder_scale=None,
+    basis_mode="random",
 ):
     """Construct teacher, normalized experiment stream, and Alemi network."""
     teacher = ICubTeacher(dt=dt, gui=False)
+    torque_reference = estimate_characteristic_torque_scale(
+        teacher,
+        seed=seed,
+    )
     experiment = RobotExperiment(
         teacher,
         noise_std=noise_std,
         torque_fraction=torque_fraction,
+        torque_reference=torque_reference,
         seed=seed,
     )
 
-    velocity_scale = np.maximum(teacher.velocity, 1e-6)
+    # Numerical normalization scale: roughly the velocity required to traverse
+    # half of each legal joint range in one second. The URDF velocity fields
+    # are placeholders and are deliberately ignored.
+    velocity_scale = np.maximum(
+        0.5 * (teacher.upper - teacher.lower),
+        0.5,
+    )
     normalizer = RobotStateNormalizer(
         teacher.lower,
         teacher.upper,
@@ -45,6 +105,7 @@ def build_arm_experiment(
         feedback_gain=feedback_gain,
         eta=eta,
         decoder_scale=decoder_scale,
+        basis_mode=basis_mode,
         seed=seed,
     )
     return teacher, experiment, normalizer, net
@@ -54,11 +115,12 @@ def train_steps(experiment, normalizer, net, n_steps):
     """Run online teacher-forced Alemi learning for n_steps."""
     errors = np.empty(n_steps)
     for i in range(n_steps):
-        x, c = experiment.step()
-        x_n = normalizer.encode_state(x)
-        c_n = normalizer.encode_command(c)
-        x_hat = net.step(c_n, x_n, learn=True)
-        errors[i] = np.sqrt(np.mean((x_n - x_hat) ** 2))
+        x_t, c_t, x_next = experiment.transition()
+        x_t_n = normalizer.encode_state(x_t)
+        c_t_n = normalizer.encode_command(c_t)
+        x_next_n = normalizer.encode_state(x_next)
+        x_hat_next = net.step(c_t_n, x_t_n, learn=True)
+        errors[i] = np.sqrt(np.mean((x_next_n - x_hat_next) ** 2))
     return errors
 
 
@@ -73,14 +135,14 @@ def autonomous_steps(experiment, normalizer, net, n_steps):
 
     try:
         for i in range(n_steps):
-            x, c = experiment.step()
-            x_n = normalizer.encode_state(x)
-            c_n = normalizer.encode_command(c)
-            x_hat = net.step(c_n, target_state=None, learn=False)
+            _, c_t, x_next = experiment.transition()
+            c_t_n = normalizer.encode_command(c_t)
+            x_next_n = normalizer.encode_state(x_next)
+            x_hat_next = net.step(c_t_n, target_state=None, learn=False)
 
-            targets[i] = x_n
-            estimates[i] = x_hat
-            errors[i] = np.sqrt(np.mean((x_n - x_hat) ** 2))
+            targets[i] = x_next_n
+            estimates[i] = x_hat_next
+            errors[i] = np.sqrt(np.mean((x_next_n - x_hat_next) ** 2))
     finally:
         net.feedback_gain = feedback
 
@@ -188,11 +250,12 @@ def evaluate_unseen_episode(
     sync_component_error = np.empty((sync_steps, experiment.state_dim))
     try:
         for i in range(sync_steps):
-            x, c = experiment.step()
-            x_n = normalizer.encode_state(x)
-            c_n = normalizer.encode_command(c)
-            x_hat = net.step(c_n, x_n, learn=False)
-            delta = x_n - x_hat
+            x_t, c_t, x_next = experiment.transition()
+            x_t_n = normalizer.encode_state(x_t)
+            c_t_n = normalizer.encode_command(c_t)
+            x_next_n = normalizer.encode_state(x_next)
+            x_hat_next = net.step(c_t_n, x_t_n, learn=False)
+            delta = x_next_n - x_hat_next
             sync_component_error[i] = delta
             sync_error[i] = np.sqrt(np.mean(delta ** 2))
 
@@ -202,12 +265,12 @@ def evaluate_unseen_episode(
         estimates = np.empty_like(targets)
 
         for i in range(n_steps):
-            x, c = experiment.step()
-            x_n = normalizer.encode_state(x)
-            c_n = normalizer.encode_command(c)
-            x_hat = net.step(c_n, target_state=None, learn=False)
-            targets[i] = x_n
-            estimates[i] = x_hat
+            _, c_t, x_next = experiment.transition()
+            c_t_n = normalizer.encode_command(c_t)
+            x_next_n = normalizer.encode_state(x_next)
+            x_hat_next = net.step(c_t_n, target_state=None, learn=False)
+            targets[i] = x_next_n
+            estimates[i] = x_hat_next
     finally:
         net.feedback_gain = feedback
 
@@ -216,7 +279,7 @@ def evaluate_unseen_episode(
     n = teacher.n_dof
     sync_tail = sync_component_error[-min(50, sync_steps):]
     horizons = {}
-    for horizon in (50, 100, 250, 500, 1000):
+    for horizon in (1, 5, 10, 25, 50, 100, 250, 500, 1000):
         if horizon <= n_steps:
             prefix = error[:horizon]
             horizons[horizon] = {
