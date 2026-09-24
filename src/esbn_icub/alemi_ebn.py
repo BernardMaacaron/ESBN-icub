@@ -48,7 +48,13 @@ class AlemiEBN:
             # Low-rank dendritic basis: Psi_i(r)=tanh(m_i^T x_hat+theta_i),
             # x_hat=Dr. This is the control-theoretically direct construction
             # discussed by Alemi et al.; it is equivalent to M = M_state D.
-            self.M_state = rng.normal(size=(n_neurons, state_dim))
+            # Scale by input dimension so tanh bases remain in their useful
+            # non-saturated regime as state_dim grows. Without this, the
+            # 21-D arm state drives most basis functions to +/-1.
+            self.M_state = rng.normal(
+                scale=1.0 / np.sqrt(state_dim),
+                size=(n_neurons, state_dim),
+            )
             self.M = self.M_state @ self.D
         else:
             self.M_state = None
@@ -123,6 +129,9 @@ class AlemiEBN:
         self.r += self.spikes
 
         if learn and target_state is not None:
+            # Alemi Eq. 4 gives dW/dt = eta * psi * e^T and the EBN mapping is
+            # W_slow = D^T W^T. Therefore
+            # dW_slow/dt = eta * (D^T e) * psi^T.
             self.W_slow += self.eta * self.dt * np.outer(projected_error, psi)
 
         return self.decoded_state.copy()
