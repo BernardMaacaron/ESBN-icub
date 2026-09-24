@@ -34,6 +34,11 @@ class FilteredTorque:
         self.dt = float(dt)
         self.alpha = float(alpha)
         self.noise_std = float(noise_std)
+        if not (0.0 <= self.noise_std <= 1.0):
+            raise ValueError(
+                "noise_std must lie in [0, 1] so the exact augmented torque "
+                "dynamics remain inside the configured bounds without clipping"
+            )
         self.driver_beta = float(driver_beta)
         self.resample_steps = max(1, int(round(resample_time / self.dt)))
         self.rng = np.random.default_rng(seed)
@@ -68,6 +73,5 @@ class FilteredTorque:
             * (self.target_xi - self.xi)
         )
         self.tau += self.dt * (-self.alpha * self.tau + self.xi)
-        self.tau = np.clip(self.tau, -self.limits, self.limits)
         self.step_index += 1
         return self.tau.copy(), self.xi.copy()
