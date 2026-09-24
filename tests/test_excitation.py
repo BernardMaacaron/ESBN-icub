@@ -7,14 +7,22 @@ def test_filtered_torque_respects_limits():
     process = FilteredTorque(
         limits=np.array([0.1, 0.2]),
         dt=0.05,
-        noise_std=100.0,
+        noise_std=1.0,
         seed=0,
     )
+    previous_tau = process.tau.copy()
     for _ in range(100):
         tau, xi = process.step()
         assert tau.shape == (2,)
         assert xi.shape == (2,)
         assert np.all(np.abs(tau) <= process.limits + 1e-12)
+        np.testing.assert_allclose(
+            (tau - previous_tau) / process.dt,
+            -process.alpha * previous_tau + xi,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        previous_tau = tau.copy()
 
 
 def test_reset_with_seed_reproduces_excitation():
