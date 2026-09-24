@@ -45,10 +45,11 @@ def run_bistable_demo(
             + 0.25 * np.sin(2.0 * np.pi * 1.9 * time)
             + 0.05 * rng.normal()
         ])
-        target = teacher.step(command)
-        estimate = net.step(command, target, learn=True)
+        target_t = teacher.state()
+        target_next = teacher.step(command)
+        estimate_next = net.step(command, target_t, learn=True)
         spike_count += float(np.sum(net.spikes))
-        train_error.append(float(target[0] - estimate[0]))
+        train_error.append(float(target_next[0] - estimate_next[0]))
 
     net.feedback_gain = 0.0
 
@@ -60,11 +61,11 @@ def run_bistable_demo(
             0.7 * np.sin(2.0 * np.pi * 0.9 * time)
             + 0.20 * np.sin(2.0 * np.pi * 2.3 * time)
         ])
-        target = teacher.step(command)
-        estimate = net.step(command, target_state=None, learn=False)
+        target_next = teacher.step(command)
+        estimate_next = net.step(command, target_state=None, learn=False)
         spike_count += float(np.sum(net.spikes))
-        target_trace[t] = target[0]
-        estimate_trace[t] = estimate[0]
+        target_trace[t] = target_next[0]
+        estimate_trace[t] = estimate_next[0]
 
     train_error = np.asarray(train_error)
     test_error = target_trace - estimate_trace
@@ -111,7 +112,7 @@ def run_bistable_trials(
         eta=2.0,
         feedback_gain=20.0,
         decoder_scale=0.05,
-        basis_mode="decoded",
+        basis_mode="random",
         seed=seed,
     )
 
@@ -135,11 +136,12 @@ def run_bistable_trials(
                 command_value = 0.0
 
             command = np.array([command_value])
-            target = teacher.step(command)
-            estimate = net.step(command, target, learn=True)
+            target_t = teacher.state()
+            target_next = teacher.step(command)
+            estimate_next = net.step(command, target_t, learn=True)
 
             train_spikes += float(np.sum(net.spikes))
-            train_error.append(float(target[0] - estimate[0]))
+            train_error.append(float(target_next[0] - estimate_next[0]))
 
     # Autonomous probe: a deterministic command pulse pushes both systems
     # away from the unstable origin; after the pulse, the learned recurrent
@@ -157,11 +159,11 @@ def run_bistable_trials(
     for t in range(test_steps):
         command_value = pulse if t < command_steps else 0.0
         command = np.array([command_value])
-        target = teacher.step(command)
-        estimate = net.step(command, target_state=None, learn=False)
+        target_next = teacher.step(command)
+        estimate_next = net.step(command, target_state=None, learn=False)
 
-        target_trace[t] = target[0]
-        estimate_trace[t] = estimate[0]
+        target_trace[t] = target_next[0]
+        estimate_trace[t] = estimate_next[0]
         command_trace[t] = command_value
         test_spikes += float(np.sum(net.spikes))
 
