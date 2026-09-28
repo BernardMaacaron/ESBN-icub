@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-pytest.importorskip("pybullet")
+pytest.importorskip("pinocchio")
 pytest.importorskip("icub_models")
 
 from esbn_icub.arm_learning import (
