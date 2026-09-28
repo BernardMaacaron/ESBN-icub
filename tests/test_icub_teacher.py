@@ -1,10 +1,15 @@
 import numpy as np
 import pytest
 
-pytest.importorskip("pybullet")
+pytest.importorskip("pinocchio")
 pytest.importorskip("icub_models")
 
-from esbn_icub.icub_teacher import ICubTeacher, RIGHT_ARM_JOINTS
+from esbn_icub.icub_genova11_config import (
+    HARDWARE_POSITION_MAX,
+    HARDWARE_POSITION_MIN,
+    RIGHT_ARM_JOINTS,
+)
+from esbn_icub.icub_teacher import ICubTeacher
 
 
 @pytest.fixture
@@ -14,17 +19,17 @@ def teacher():
     robot.close()
 
 
-def test_expected_arm_joint_set(teacher):
-    assert teacher.n_dof == 7
-    assert tuple(RIGHT_ARM_JOINTS) == (
-        "r_shoulder_pitch",
-        "r_shoulder_roll",
-        "r_shoulder_yaw",
-        "r_elbow",
-        "r_wrist_prosup",
-        "r_wrist_pitch",
-        "r_wrist_yaw",
-    )
+def test_full_model_is_loaded_then_reduced_to_seven_dof(teacher):
+    assert teacher.full_model_nq > 7
+    assert teacher.full_model_nv > 7
+    assert teacher.model.nq == 7
+    assert teacher.model.nv == 7
+    assert tuple(teacher.model.names[1:]) == RIGHT_ARM_JOINTS
+
+
+def test_hardware_position_limits_are_used(teacher):
+    np.testing.assert_allclose(teacher.lower, HARDWARE_POSITION_MIN)
+    np.testing.assert_allclose(teacher.upper, HARDWARE_POSITION_MAX)
 
 
 def test_mass_matrix_is_symmetric_positive_definite(teacher):
@@ -43,7 +48,17 @@ def test_inverse_dynamics_mass_matrix_identity_at_zero_velocity(teacher):
     tau = teacher.inverse_dynamics(q, qdot, qddot)
     M = teacher.mass_matrix(q)
 
-    np.testing.assert_allclose(tau, M @ qddot + h, rtol=1e-5, atol=1e-7)
+    np.testing.assert_allclose(tau, M @ qddot + h, rtol=1e-7, atol=1e-9)
+
+
+def test_acceleration_inverts_rigid_body_dynamics(teacher):
+    q = 0.5 * (teacher.lower + teacher.upper)
+    qdot = np.linspace(-0.1, 0.1, teacher.n_dof)
+    desired_qddot = np.linspace(-0.5, 0.5, teacher.n_dof)
+    tau = teacher.inverse_dynamics(q, qdot, desired_qddot)
+
+    recovered = teacher.acceleration(q, qdot, tau)
+    np.testing.assert_allclose(recovered, desired_qddot, rtol=1e-7, atol=1e-9)
 
 
 def test_mass_matrix_changes_with_configuration(teacher):
@@ -75,22 +90,12 @@ def test_gravity_term_changes_with_configuration(teacher):
 
     g_a = teacher.inverse_dynamics(q_a, zeros, zeros)
     g_b = teacher.inverse_dynamics(q_b, zeros, zeros)
-
     assert np.linalg.norm(g_a - g_b) > 1e-6
 
 
-def test_same_torque_implies_configuration_dependent_acceleration(teacher):
-    q_mid = 0.5 * (teacher.lower + teacher.upper)
-    span = teacher.upper - teacher.lower
-    q_a = q_mid - 0.15 * span
-    q_b = q_mid + 0.15 * span
-    zeros = np.zeros(teacher.n_dof)
-
-    h_a = teacher.inverse_dynamics(q_a, zeros, zeros)
-    h_b = teacher.inverse_dynamics(q_b, zeros, zeros)
-    tau = 0.5 * (h_a + h_b)
-
-    qdd_a = np.linalg.solve(teacher.mass_matrix(q_a), tau - h_a)
-    qdd_b = np.linalg.solve(teacher.mass_matrix(q_b), tau - h_b)
-
-    assert np.linalg.norm(qdd_a - qdd_b) > 1e-6
+def test_one_step_is_finite(teacher):
+    q0 = 0.5 * (teacher.lower + teacher.upper)
+    teacher.reset(q0, np.zeros(teacher.n_dof))
+    q1, qdot1 = teacher.step(np.zeros(teacher.n_dof))
+    assert np.all(np.isfinite(q1))
+    assert np.all(np.isfinite(qdot1))
