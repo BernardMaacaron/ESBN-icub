@@ -61,18 +61,20 @@ The network receives only the additive command and teacher state during training
 - [ ] Document finger inertia provenance.
 - [ ] Validate all finger limits and couplings.
 
-### Phase 2 — PyBullet dynamics teacher
+### Phase 2 — rigid-body dynamics teacher
 
-- [x] ICubTeacher implemented.
-- [x] URDF loaded with URDF_USE_INERTIA_FROM_FILE.
-- [x] package://iCub asset paths resolved locally.
-- [x] Default active-joint servos disabled.
-- [x] Direct torque control implemented.
+- [x] ICubTeacher implemented with Pinocchio.
+- [x] Official full iCubGenova11 physical URDF loaded verbatim.
+- [x] All non-arm joints locked through Pinocchio reduced-model construction.
+- [x] Locked-subtree inertias retained through rigid-body reduction.
+- [x] Seven right-arm generalized torques exposed directly.
 - [x] State reset and readout implemented.
 - [x] Mass-matrix query implemented.
 - [x] Inverse-dynamics query implemented.
-- [x] Non-active movable joints held fixed.
-- [x] Joint limits and effort limits exposed.
+- [x] Forward acceleration and deterministic integration implemented.
+- [x] Physical joint-position limits sourced from robots-configuration.
+- [x] Placeholder URDF effort/velocity values excluded from learning scales.
+- [x] Official shoulder/wrist motor-joint coupling matrices documented.
 
 ### Phase 3 — physics validation
 
@@ -139,15 +141,20 @@ Unit tests need only NumPy and pytest:
     pip install -e ".[test]"
     pytest -q tests/test_alemi_ebn.py tests/test_excitation.py
 
-Robot tests install PyBullet and the pinned official iCub model package:
+Robot tests install Pinocchio and the pinned official iCub model package:
 
     pip install -e ".[test,robot]"
-    pytest -q tests/test_icub_teacher.py tests/test_robot_experiment.py
+    pytest -q tests/test_icub_teacher.py tests/test_robot_experiment.py tests/test_arm_learning.py
+
+PyBullet is now optional and reserved for future visualization or independent
+simulation cross-checks:
+
+    pip install -e ".[bullet]"
 
 ## Repository layout
 
     src/esbn_icub/alemi_ebn.py       Alemi-style EBN
-    src/esbn_icub/icub_teacher.py    PyBullet iCubGenova11 teacher
+    src/esbn_icub/icub_teacher.py    Pinocchio full-model iCubGenova11 teacher
     src/esbn_icub/excitation.py      filtered torque process
     src/esbn_icub/robot_experiment.py augmented-state formulation
     tests/                           numerical and dynamics checks
