@@ -184,7 +184,7 @@ def train_episodes(
     span = upper - lower
     q_low = lower + position_margin * span
     q_high = upper - position_margin * span
-    qdot_scale = velocity_fraction * np.maximum(teacher.velocity, 1e-6)
+    qdot_scale = velocity_fraction * normalizer.velocity_scale
 
     initial_feedback_gain = float(net.feedback_gain)
     episode_rmse = np.empty(n_episodes)
