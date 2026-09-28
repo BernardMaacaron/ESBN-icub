@@ -98,7 +98,7 @@ The network receives only the additive command and teacher state during training
 - [x] Local W_slow update implemented.
 - [x] Unit tests for dimensions and local update written.
 - [x] Reproduce a simple nonlinear bistable teacher-system learning experiment.
-- [x] Verify k=0 autonomous bistable behavior.
+- [ ] Re-validate k=0 autonomous bistable behavior with the reviewed random-dendrite implementation.
 - [ ] Add firing-rate and raster diagnostics.
 
 ### Phase 5 — robot/Alemi formulation
