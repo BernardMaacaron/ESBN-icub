@@ -1,4 +1,4 @@
-"""Map the torque-driven iCub teacher into Alemi's additive-input form."""
+"""Map the torque-driven rigid-body iCub teacher into Alemi's additive-input form."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from .icub_teacher import ICubTeacher
 
 
 class RobotExperiment:
-    """Stream x=[q, qdot, tau] and c=[0, 0, xi] from the PyBullet teacher."""
+    """Stream x=[q, qdot, tau] and c=[0, 0, xi] from the rigid-body teacher."""
 
     def __init__(
         self,
