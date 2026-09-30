@@ -8,15 +8,18 @@ import numpy as np
 class FilteredTorque:
     """Bounded, band-limited torque process.
 
-    The augmented state contains torque and obeys
+    The augmented state contains the *total* applied torque and obeys
 
-        tau_dot = -alpha * tau + xi(t)
+        tau_dot = -alpha * tau + c_tau(t)
 
-    where xi(t) is itself a low-pass-filtered random signal. noise_std is
-    dimensionless: values near 1 drive the equilibrium torque over most of the
-    configured torque range; smaller values produce proportionally weaker
-    excitation. The returned xi is the exact additive command supplied to the
-    Alemi network.
+    with
+
+        c_tau(t) = alpha * bias + xi(t).
+
+    bias is fixed within an episode (typically the gravity-compensation torque
+    at the initial pose), while xi(t) is a low-pass-filtered random signal.
+    This keeps the plant near the sampled pose without changing Alemi's
+    additive-input formulation.
     """
 
     def __init__(
@@ -43,15 +46,23 @@ class FilteredTorque:
         self.resample_steps = max(1, int(round(resample_time / self.dt)))
         self.rng = np.random.default_rng(seed)
 
+        self.bias = np.zeros_like(self.limits)
         self.tau = np.zeros_like(self.limits)
         self.xi = np.zeros_like(self.limits)
         self.target_xi = np.zeros_like(self.limits)
         self.step_index = 0
 
-    def reset(self, *, seed=None):
+    def reset(self, *, seed=None, bias=None):
         if seed is not None:
             self.rng = np.random.default_rng(seed)
-        self.tau.fill(0.0)
+        if bias is None:
+            self.bias.fill(0.0)
+        else:
+            bias = np.asarray(bias, dtype=float)
+            if bias.shape != self.limits.shape:
+                raise ValueError(f"bias must have shape {self.limits.shape}")
+            self.bias = bias.copy()
+        self.tau = self.bias.copy()
         self.xi.fill(0.0)
         self.target_xi.fill(0.0)
         self.step_index = 0
@@ -72,6 +83,7 @@ class FilteredTorque:
             * self.driver_beta
             * (self.target_xi - self.xi)
         )
-        self.tau += self.dt * (-self.alpha * self.tau + self.xi)
+        additive_command = self.alpha * self.bias + self.xi
+        self.tau += self.dt * (-self.alpha * self.tau + additive_command)
         self.step_index += 1
-        return self.tau.copy(), self.xi.copy()
+        return self.tau.copy(), additive_command.copy()
