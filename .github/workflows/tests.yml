@@ -29,11 +29,13 @@ jobs:
               n_neurons=50,
               seed=0,
           )
-          print({k: v for k, v in r.items() if not k.endswith("_trace")})
-
-          # Reuse the trained network protocol in a dedicated acceptance
-          # experiment below once training returns the network object. For now
-          # this job remains diagnostic and the unit test covers the metric API.
+          summary = {k: v for k, v in r.items() if not k.endswith("_trace")}
+          print(summary)
+          if r["attractor_success_rate"] < 0.80:
+              raise SystemExit(
+                  "Bistable acceptance failed: "
+                  f"{r['attractor_success_rate']:.3f} < 0.80"
+              )
           PY
 
   robot:
