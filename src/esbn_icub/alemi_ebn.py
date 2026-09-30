@@ -117,13 +117,19 @@ class AlemiEBN:
         # recurrent reset/inhibition immediately, then re-evaluate. This is
         # the discrete event analogue of the -W_fast s impulse term.
         self.spikes.fill(0.0)
-        for _ in range(2 * self.n_neurons):
+        for _ in range(4 * self.n_neurons):
             excess = self.u - self.threshold
             i = int(np.argmax(excess))
             if excess[i] <= 0.0:
                 break
             self.spikes[i] += 1.0
             self.u -= self.W_fast[:, i]
+        else:
+            if np.any(self.u > self.threshold):
+                raise RuntimeError(
+                    "Spike resolution did not converge within one timestep; "
+                    "reduce dt or rescale the network."
+                )
 
         self.r += self.dt * (-self.lam * self.r)
         self.r += self.spikes
