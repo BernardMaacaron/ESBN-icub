@@ -56,7 +56,17 @@ class RobotExperiment:
         if qdot is None:
             qdot = np.zeros(self.teacher.n_dof)
         self.teacher.reset(q, qdot)
-        self.excitation.reset(seed=excitation_seed)
+
+        # Keep each free-space episode near its sampled initial pose by
+        # centering the torque process on the static gravity torque at q0.
+        # The bias is constant within the episode, so the augmented dynamics
+        # remain exactly tau_dot = -alpha*tau + c_tau(t).
+        gravity_bias = self.teacher.inverse_dynamics(
+            np.asarray(q, dtype=float),
+            np.zeros(self.teacher.n_dof),
+            np.zeros(self.teacher.n_dof),
+        )
+        self.excitation.reset(seed=excitation_seed, bias=gravity_bias)
         return self.state()
 
     def state(self):
