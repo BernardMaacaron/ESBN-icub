@@ -32,7 +32,7 @@ from .icub_genova11_config import (
 class ICubTeacher:
     """Fixed-base seven-DOF right arm derived from full iCubGenova11."""
 
-    def __init__(self, dt=1e-3, gui=False):
+    def __init__(self, dt=1e-3, gui=False, integration_substeps=4):
         if pin is None:
             raise ImportError("Pinocchio is required: pip install -e '.[robot]'")
         if icub_models is None:
@@ -44,6 +44,10 @@ class ICubTeacher:
             )
 
         self.dt = float(dt)
+        self.integration_substeps = int(integration_substeps)
+        if self.integration_substeps < 1:
+            raise ValueError("integration_substeps must be >= 1")
+        self.integration_dt = self.dt / self.integration_substeps
         self.urdf_path = Path(icub_models.get_model_file("iCubGenova11"))
 
         full_model = pin.buildModelFromUrdf(str(self.urdf_path))
@@ -156,6 +160,7 @@ class ICubTeacher:
         ).copy()
 
     def acceleration(self, q, qdot, tau):
+        """Forward rigid-body acceleration from Pinocchio ABA."""
         q = np.asarray(q, dtype=float)
         qdot = np.asarray(qdot, dtype=float)
         tau = np.asarray(tau, dtype=float)
@@ -163,23 +168,75 @@ class ICubTeacher:
         if q.shape != expected or qdot.shape != expected or tau.shape != expected:
             raise ValueError(f"q, qdot and tau must have shape {expected}")
 
-        M = self.mass_matrix(q)
-        h = self.inverse_dynamics(q, qdot, np.zeros(self.n_dof))
-        return np.linalg.solve(M, tau - h)
+        return np.asarray(
+            pin.aba(self.model, self.data, q, qdot, tau),
+            dtype=float,
+        ).copy()
+
+    def _rk4_substep(self, q, qdot, tau, h):
+        """One fourth-order integration substep on the configuration manifold."""
+        a1 = self.acceleration(q, qdot, tau)
+
+        v2 = qdot + 0.5 * h * a1
+        q2 = np.asarray(
+            pin.integrate(self.model, q, 0.5 * h * qdot),
+            dtype=float,
+        )
+        a2 = self.acceleration(q2, v2, tau)
+
+        v3 = qdot + 0.5 * h * a2
+        q3 = np.asarray(
+            pin.integrate(self.model, q, 0.5 * h * v2),
+            dtype=float,
+        )
+        a3 = self.acceleration(q3, v3, tau)
+
+        v4 = qdot + h * a3
+        q4 = np.asarray(
+            pin.integrate(self.model, q, h * v3),
+            dtype=float,
+        )
+        a4 = self.acceleration(q4, v4, tau)
+
+        qdot_next = qdot + (h / 6.0) * (a1 + 2.0 * a2 + 2.0 * a3 + a4)
+        tangent_step = (h / 6.0) * (qdot + 2.0 * v2 + 2.0 * v3 + v4)
+        q_next = np.asarray(
+            pin.integrate(self.model, q, tangent_step),
+            dtype=float,
+        )
+        return q_next, qdot_next
 
     def step(self, tau=None):
-        """Advance the torque-driven rigid-body system by one semi-implicit step."""
+        """Advance one external timestep using RK4 with internal substeps."""
         if tau is not None:
             self.set_torque(tau)
 
-        qddot = self.acceleration(self.q, self.qdot, self._tau)
-        self.qdot = self.qdot + self.dt * qddot
-        self.q = np.asarray(
-            pin.integrate(self.model, self.q, self.dt * self.qdot),
-            dtype=float,
-        )
+        q = self.q
+        qdot = self.qdot
+        for _ in range(self.integration_substeps):
+            q, qdot = self._rk4_substep(
+                q,
+                qdot,
+                self._tau,
+                self.integration_dt,
+            )
+            if np.any(~np.isfinite(q)) or np.any(~np.isfinite(qdot)):
+                raise FloatingPointError(
+                    "Non-finite state in iCub rigid-body integration"
+                )
 
-        if np.any(~np.isfinite(self.q)) or np.any(~np.isfinite(self.qdot)):
-            raise FloatingPointError("Non-finite state in iCub rigid-body integration")
-
+        self.q = q
+        self.qdot = qdot
         return self.state()
+
+    def total_energy(self, q=None, qdot=None):
+        """Mechanical energy for numerical diagnostics."""
+        if q is None:
+            q = self.q
+        if qdot is None:
+            qdot = self.qdot
+        q = np.asarray(q, dtype=float)
+        qdot = np.asarray(qdot, dtype=float)
+        kinetic = float(pin.computeKineticEnergy(self.model, self.data, q, qdot))
+        potential = float(pin.computePotentialEnergy(self.model, self.data, q))
+        return kinetic + potential
