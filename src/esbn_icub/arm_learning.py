@@ -95,7 +95,7 @@ def build_arm_experiment(
         teacher.lower,
         teacher.upper,
         velocity_scale,
-        experiment.torque_limits,
+        experiment.torque_reference,
     )
 
     net = AlemiEBN(
