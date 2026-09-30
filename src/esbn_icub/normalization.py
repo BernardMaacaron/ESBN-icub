@@ -9,8 +9,9 @@ class RobotStateNormalizer:
     """Normalize x=[q,qdot,tau] using fixed robot limits.
 
     Positions are centered at the middle of each legal joint range and scaled
-    by half-range. Velocities and torques are scaled by fixed positive limits.
-    The additive command c=[0,0,xi] is transformed with the same torque scale.
+    by half-range. Velocities and total applied torques are scaled by fixed
+    positive characteristic scales. The additive command c=[0,0,c_tau] is
+    transformed with the same torque scale used for the torque state.
     """
 
     def __init__(self, lower, upper, velocity_scale, torque_scale):
