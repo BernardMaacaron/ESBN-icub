@@ -71,7 +71,8 @@ The network receives only the additive command and teacher state during training
 - [x] State reset and readout implemented.
 - [x] Mass-matrix query implemented.
 - [x] Inverse-dynamics query implemented.
-- [x] Forward acceleration and deterministic integration implemented.
+- [x] Forward acceleration implemented with Pinocchio ABA.
+- [x] RK4 rigid-body integration with configurable internal substeps.
 - [x] Physical joint-position limits sourced from robots-configuration.
 - [x] Placeholder URDF effort/velocity values excluded from learning scales.
 - [x] Official shoulder/wrist motor-joint coupling matrices documented.
@@ -97,7 +98,9 @@ The network receives only the additive command and teacher state during training
 - [x] Error feedback implemented.
 - [x] Local W_slow update implemented.
 - [x] Unit tests for dimensions and local update written.
-- [x] Reproduce a simple nonlinear bistable teacher-system learning experiment.
+- [x] Bistable teacher/training protocol implemented.
+- [x] Multi-trial unseen-attractor acceptance metric implemented.
+- [ ] Pass the >=80% autonomous bistable acceptance criterion.
 - [ ] Re-validate k=0 autonomous bistable behavior with the reviewed random-dendrite implementation.
 - [ ] Add firing-rate and raster diagnostics.
 
@@ -113,15 +116,16 @@ The network receives only the additive command and teacher state during training
 
 ### Phase 6 — arm learning smoke test
 
-Current status: the harness is operational and CI is green, but long autonomous
-rollouts still drift substantially in joint position. This phase is therefore
-implemented but not yet considered successful. The next diagnostics separate
-short-horizon vector-field accuracy from long-horizon accumulation.
+Current status: the harness is implemented but arm learning is not yet accepted. The
+teacher now uses ABA + RK4 substeps and short legal-state episodes. Arm metrics remain
+diagnostic until the standalone bistable acceptance test and long-rollout teacher tests
+are both green.
 
 
-- [x] Train the Alemi EBN on the 7-DOF arm.
+- [x] Arm training/evaluation harness implemented.
 - [x] Anneal teacher feedback gain.
-- [x] Evaluate with k=0.
+- [x] k=0 evaluation harness implemented.
+- [ ] Validate successful k=0 arm dynamics.
 - [x] Test unseen initial configurations.
 - [x] Test unseen torque sequences with disjoint excitation seeds.
 - [ ] Plot per-joint q and qdot errors.
