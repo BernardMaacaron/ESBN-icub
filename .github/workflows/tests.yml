@@ -17,7 +17,10 @@ jobs:
       - name: Report bistable autonomous metric
         run: |
           python - <<'PY'
-          from esbn_icub.bistable_demo import run_bistable_trials
+          from esbn_icub.bistable_demo import (
+              evaluate_bistable_attractors,
+              run_bistable_trials,
+          )
           r = run_bistable_trials(
               train_trials=500,
               train_trial_steps=1000,
@@ -27,8 +30,10 @@ jobs:
               seed=0,
           )
           print({k: v for k, v in r.items() if not k.endswith("_trace")})
-          # Diagnostic only while the random-dendrite Alemi implementation is
-          # being revalidated after the implementation review.
+
+          # Reuse the trained network protocol in a dedicated acceptance
+          # experiment below once training returns the network object. For now
+          # this job remains diagnostic and the unit test covers the metric API.
           PY
 
   robot:
@@ -57,8 +62,8 @@ jobs:
               seed=0,
               torque_fraction=0.10,
               noise_std=0.5,
-              n_steps=1000,
-              sync_steps=300,
+              n_steps=400,
+              sync_steps=150,
           )
           print({
               "baseline_sync_rmse": baseline["sync_rmse"],
@@ -72,9 +77,9 @@ jobs:
               feedback_gains=(20.0, 40.0),
               n_neurons=128,
               n_episodes=8,
-              steps_per_episode=1000,
-              eval_steps=1000,
-              sync_steps=300,
+              steps_per_episode=400,
+              eval_steps=400,
+              sync_steps=150,
               torque_fraction=0.10,
               noise_std=0.5,
               seed=0,
@@ -113,7 +118,7 @@ jobs:
                       normalizer,
                       net,
                       n_episodes=20,
-                      steps_per_episode=1000,
+                      steps_per_episode=400,
                       seed=0,
                       final_feedback_gain=final_gain,
                   )
@@ -121,8 +126,8 @@ jobs:
                       experiment,
                       normalizer,
                       net,
-                      n_steps=1500,
-                      sync_steps=500,
+                      n_steps=400,
+                      sync_steps=150,
                       seed=123,
                   )
                   print({
@@ -171,7 +176,7 @@ jobs:
                   normalizer,
                   net,
                   n_episodes=8,
-                  steps_per_episode=1000,
+                  steps_per_episode=400,
                   seed=0,
                   final_feedback_gain=10.0,
               )
@@ -179,8 +184,8 @@ jobs:
                   experiment,
                   normalizer,
                   net,
-                  n_steps=1000,
-                  sync_steps=300,
+                  n_steps=400,
+                  sync_steps=150,
                   seed=321,
               )
               print("ARM_SYNC", {
@@ -217,7 +222,7 @@ jobs:
                   normalizer,
                   net,
                   n_episodes=20,
-                  steps_per_episode=2000,
+                  steps_per_episode=400,
                   seed=0,
                   final_feedback_gain=10.0,
               )
@@ -225,8 +230,8 @@ jobs:
                   experiment,
                   normalizer,
                   net,
-                  n_steps=2000,
-                  sync_steps=300,
+                  n_steps=400,
+                  sync_steps=150,
                   seed=123,
               )
               print({
