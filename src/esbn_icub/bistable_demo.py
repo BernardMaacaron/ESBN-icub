@@ -192,3 +192,62 @@ def run_bistable_trials(
         "estimate_trace": estimate_trace,
         "command_trace": command_trace,
     }
+
+
+def evaluate_bistable_attractors(
+    net,
+    *,
+    dt=1e-3,
+    n_trials=40,
+    command_steps=500,
+    settle_steps=3000,
+    pulse=1.5,
+    seed=1234,
+    tolerance=0.15,
+):
+    """Evaluate autonomous attraction to +/-0.5 over unseen trials."""
+    rng = np.random.default_rng(seed)
+    teacher = BistableTeacher(dt=dt)
+    original_gain = net.feedback_gain
+    successes = 0
+    final_errors = []
+    final_targets = []
+    final_estimates = []
+
+    try:
+        net.feedback_gain = 0.0
+        for trial in range(n_trials):
+            sign = -1.0 if trial % 2 else 1.0
+            teacher.reset(rng.uniform(-0.02, 0.02))
+            net.reset()
+
+            for t in range(command_steps + settle_steps):
+                command_value = sign * pulse if t < command_steps else 0.0
+                command = np.array([command_value])
+                target = teacher.step(command)
+                estimate = net.step(command, target_state=None, learn=False)
+
+            target_final = float(target[0])
+            estimate_final = float(estimate[0])
+            target_sign = np.sign(target_final)
+            estimate_sign = np.sign(estimate_final)
+            attractor_error = abs(abs(estimate_final) - 0.5)
+            ok = (
+                target_sign != 0.0
+                and estimate_sign == target_sign
+                and attractor_error <= tolerance
+            )
+            successes += int(ok)
+            final_errors.append(attractor_error)
+            final_targets.append(target_final)
+            final_estimates.append(estimate_final)
+    finally:
+        net.feedback_gain = original_gain
+
+    return {
+        "success_rate": successes / n_trials,
+        "mean_attractor_error": float(np.mean(final_errors)),
+        "max_attractor_error": float(np.max(final_errors)),
+        "final_targets": np.asarray(final_targets),
+        "final_estimates": np.asarray(final_estimates),
+    }
