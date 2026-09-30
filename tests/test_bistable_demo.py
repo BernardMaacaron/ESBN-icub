@@ -1,6 +1,6 @@
 import numpy as np
 
-from esbn_icub.bistable_demo import run_bistable_demo, run_bistable_trials
+from esbn_icub.bistable_demo import evaluate_bistable_attractors, run_bistable_demo, run_bistable_trials
 
 
 def test_bistable_demo_runs_finite():
@@ -40,3 +40,24 @@ def test_bistable_trials_runs_finite():
         "slow_weight_norm",
     ):
         assert np.isfinite(result[key])
+
+
+def test_bistable_multi_trial_acceptance_metric_runs():
+    from esbn_icub.alemi_ebn import AlemiEBN
+
+    net = AlemiEBN(
+        state_dim=1,
+        n_neurons=20,
+        dt=1e-3,
+        feedback_gain=0.0,
+        seed=0,
+    )
+    result = evaluate_bistable_attractors(
+        net,
+        n_trials=4,
+        command_steps=5,
+        settle_steps=5,
+        seed=0,
+    )
+    assert 0.0 <= result["success_rate"] <= 1.0
+    assert np.isfinite(result["mean_attractor_error"])
