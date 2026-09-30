@@ -36,3 +36,27 @@ def test_reset_with_seed_reproduces_excitation():
     process.reset(seed=123)
     seq_b = [process.step()[1].copy() for _ in range(20)]
     np.testing.assert_allclose(seq_a, seq_b)
+
+
+def test_bias_preserves_exact_additive_torque_dynamics():
+    process = FilteredTorque(
+        limits=np.array([0.2, 0.3]),
+        dt=0.01,
+        noise_std=0.25,
+        seed=7,
+    )
+    bias = np.array([1.2, -0.8])
+    process.reset(seed=7, bias=bias)
+
+    previous_tau = process.tau.copy()
+    assert np.allclose(previous_tau, bias)
+
+    for _ in range(50):
+        tau, command = process.step()
+        np.testing.assert_allclose(
+            (tau - previous_tau) / process.dt,
+            -process.alpha * previous_tau + command,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        previous_tau = tau.copy()
