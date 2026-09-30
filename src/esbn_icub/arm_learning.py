@@ -111,17 +111,34 @@ def build_arm_experiment(
     return teacher, experiment, normalizer, net
 
 
-def train_steps(experiment, normalizer, net, n_steps):
-    """Run online teacher-forced Alemi learning for n_steps."""
-    errors = np.empty(n_steps)
-    for i in range(n_steps):
+def train_steps(
+    experiment,
+    normalizer,
+    net,
+    n_steps,
+    *,
+    position_margin=0.02,
+):
+    """Run teacher-forced learning, stopping before hardware limits are crossed."""
+    errors = []
+    teacher = experiment.teacher
+    span = teacher.upper - teacher.lower
+    lower_guard = teacher.lower + position_margin * span
+    upper_guard = teacher.upper - position_margin * span
+
+    for _ in range(n_steps):
         x_t, c_t, x_next = experiment.transition()
+        q_next = x_next[:teacher.n_dof]
+        if np.any(q_next <= lower_guard) or np.any(q_next >= upper_guard):
+            break
+
         x_t_n = normalizer.encode_state(x_t)
         c_t_n = normalizer.encode_command(c_t)
         x_next_n = normalizer.encode_state(x_next)
         x_hat_next = net.step(c_t_n, x_t_n, learn=True)
-        errors[i] = np.sqrt(np.mean((x_next_n - x_hat_next) ** 2))
-    return errors
+        errors.append(np.sqrt(np.mean((x_next_n - x_hat_next) ** 2)))
+
+    return np.asarray(errors, dtype=float)
 
 
 def autonomous_steps(experiment, normalizer, net, n_steps):
@@ -210,7 +227,10 @@ def train_episodes(
             net,
             steps_per_episode,
         )
-        episode_rmse[episode] = np.sqrt(np.mean(error**2))
+        if error.size == 0:
+            episode_rmse[episode] = np.nan
+        else:
+            episode_rmse[episode] = np.sqrt(np.mean(error**2))
 
     net.feedback_gain = initial_feedback_gain
     return episode_rmse
@@ -316,7 +336,7 @@ def evaluate_untrained_baseline(
     torque_fraction=0.10,
     noise_std=0.5,
     n_steps=1000,
-    sync_steps=300,
+    sync_steps=150,
 ):
     """Evaluate a fresh, untrained network using the same unseen-state protocol."""
     teacher, experiment, normalizer, net = build_arm_experiment(
@@ -346,8 +366,8 @@ def sweep_arm_hyperparameters(
     feedback_gains=(20.0, 40.0),
     n_neurons=128,
     n_episodes=8,
-    steps_per_episode=1000,
-    eval_steps=1000,
+    steps_per_episode=400,
+    eval_steps=400,
     sync_steps=300,
     torque_fraction=0.10,
     noise_std=0.5,
