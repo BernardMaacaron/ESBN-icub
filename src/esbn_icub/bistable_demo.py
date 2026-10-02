@@ -70,17 +70,6 @@ def run_bistable_demo(
     train_error = np.asarray(train_error)
     test_error = target_trace - estimate_trace
 
-    acceptance = evaluate_bistable_attractors(
-        net,
-        dt=dt,
-        n_trials=40,
-        command_steps=command_steps,
-        settle_steps=max(1000, test_steps - command_steps),
-        pulse=pulse,
-        seed=seed + 10000,
-        tolerance=0.15,
-    )
-
     return {
         "train_rmse_tail": float(np.sqrt(np.mean(train_error[-1000:] ** 2))),
         "test_rmse": float(np.sqrt(np.mean(test_error ** 2))),
@@ -180,6 +169,17 @@ def run_bistable_trials(
 
     train_error = np.asarray(train_error)
     test_error = target_trace - estimate_trace
+
+    acceptance = evaluate_bistable_attractors(
+        net,
+        dt=dt,
+        n_trials=40,
+        command_steps=command_steps,
+        settle_steps=max(1000, test_steps - command_steps),
+        pulse=pulse,
+        seed=seed + 10000,
+        tolerance=0.15,
+    )
 
     return {
         "train_rmse_tail": float(
