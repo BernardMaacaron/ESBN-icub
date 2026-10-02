@@ -111,6 +111,14 @@ def build_arm_experiment(
     return teacher, experiment, normalizer, net
 
 
+def _inside_position_guard(x, teacher, margin=0.02):
+    q = np.asarray(x[:teacher.n_dof], dtype=float)
+    span = teacher.upper - teacher.lower
+    lower = teacher.lower + margin * span
+    upper = teacher.upper - margin * span
+    return bool(np.all(q > lower) and np.all(q < upper))
+
+
 def train_steps(
     experiment,
     normalizer,
@@ -141,32 +149,51 @@ def train_steps(
     return np.asarray(errors, dtype=float)
 
 
-def autonomous_steps(experiment, normalizer, net, n_steps):
-    """Evaluate with teacher feedback and learning disabled."""
+def autonomous_steps(
+    experiment,
+    normalizer,
+    net,
+    n_steps,
+    *,
+    position_margin=0.02,
+):
+    """Evaluate with feedback and learning disabled inside the legal state region."""
     feedback = net.feedback_gain
     net.feedback_gain = 0.0
 
-    errors = np.empty(n_steps)
-    targets = np.empty((n_steps, experiment.state_dim))
-    estimates = np.empty_like(targets)
+    targets = []
+    estimates = []
 
     try:
-        for i in range(n_steps):
+        for _ in range(n_steps):
             _, c_t, x_next = experiment.transition()
+            if not _inside_position_guard(
+                x_next,
+                experiment.teacher,
+                margin=position_margin,
+            ):
+                break
+
             c_t_n = normalizer.encode_command(c_t)
             x_next_n = normalizer.encode_state(x_next)
             x_hat_next = net.step(c_t_n, target_state=None, learn=False)
 
-            targets[i] = x_next_n
-            estimates[i] = x_hat_next
-            errors[i] = np.sqrt(np.mean((x_next_n - x_hat_next) ** 2))
+            targets.append(x_next_n)
+            estimates.append(x_hat_next)
     finally:
         net.feedback_gain = feedback
 
+    if not targets:
+        raise RuntimeError("Autonomous rollout left the legal state region immediately")
+
+    targets = np.asarray(targets)
+    estimates = np.asarray(estimates)
     error = targets - estimates
+    errors = np.sqrt(np.mean(error**2, axis=1))
+
     horizons = {}
     for horizon in (1, 5, 10, 25, 50, 100, 250, 500, 1000):
-        if horizon <= n_steps:
+        if horizon <= len(error):
             prefix = error[:horizon]
             horizons[horizon] = float(np.sqrt(np.mean(prefix**2)))
 
@@ -176,6 +203,8 @@ def autonomous_steps(experiment, normalizer, net, n_steps):
         "step_rmse": errors,
         "targets": targets,
         "estimates": estimates,
+        "executed_steps": int(len(error)),
+        "terminated_at_position_guard": bool(len(error) < n_steps),
     }
 
 
@@ -285,6 +314,10 @@ def evaluate_unseen_episode(
     try:
         for i in range(sync_steps):
             x_t, c_t, x_next = experiment.transition()
+            if not _inside_position_guard(x_next, teacher, margin=0.02):
+                raise RuntimeError(
+                    "Synchronization trajectory left the legal state region"
+                )
             x_t_n = normalizer.encode_state(x_t)
             c_t_n = normalizer.encode_command(c_t)
             x_next_n = normalizer.encode_state(x_next)
@@ -295,16 +328,26 @@ def evaluate_unseen_episode(
 
         net.feedback_gain = 0.0
 
-        targets = np.empty((n_steps, experiment.state_dim))
-        estimates = np.empty_like(targets)
+        targets = []
+        estimates = []
 
-        for i in range(n_steps):
+        for _ in range(n_steps):
             _, c_t, x_next = experiment.transition()
+            if not _inside_position_guard(x_next, teacher, margin=0.02):
+                break
             c_t_n = normalizer.encode_command(c_t)
             x_next_n = normalizer.encode_state(x_next)
             x_hat_next = net.step(c_t_n, target_state=None, learn=False)
-            targets[i] = x_next_n
-            estimates[i] = x_hat_next
+            targets.append(x_next_n)
+            estimates.append(x_hat_next)
+
+        if not targets:
+            raise RuntimeError(
+                "Autonomous evaluation left the legal state region immediately"
+            )
+
+        targets = np.asarray(targets)
+        estimates = np.asarray(estimates)
     finally:
         net.feedback_gain = feedback
 
@@ -338,6 +381,8 @@ def evaluate_unseen_episode(
         "tau_rmse": float(np.sqrt(np.mean(error[:, 2*n:]**2))),
         "targets": targets,
         "estimates": estimates,
+        "executed_steps": int(len(error)),
+        "terminated_at_position_guard": bool(len(error) < n_steps),
     }
 
 
