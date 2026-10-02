@@ -88,3 +88,25 @@ def test_arm_builder_ignores_placeholder_urdf_limits():
         assert net.basis_mode == "random"
     finally:
         teacher.close()
+
+
+def test_default_excitation_stays_in_legal_region_for_short_episode():
+    teacher, experiment, normalizer, net = build_arm_experiment(
+        dt=1e-3,
+        n_neurons=64,
+        seed=5,
+    )
+    try:
+        q0 = 0.5 * (teacher.lower + teacher.upper)
+        experiment.reset(q0, np.zeros(teacher.n_dof), excitation_seed=5)
+        span = teacher.upper - teacher.lower
+        lower = teacher.lower + 0.02 * span
+        upper = teacher.upper - 0.02 * span
+
+        for _ in range(250):
+            x, _ = experiment.step()
+            q = x[:teacher.n_dof]
+            assert np.all(q > lower)
+            assert np.all(q < upper)
+    finally:
+        teacher.close()
