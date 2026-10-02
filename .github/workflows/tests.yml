@@ -62,7 +62,7 @@ jobs:
           baseline = evaluate_untrained_baseline(
               n_neurons=128,
               seed=0,
-              torque_fraction=0.10,
+              torque_fraction=0.02,
               noise_std=0.5,
               n_steps=400,
               sync_steps=150,
@@ -83,7 +83,7 @@ jobs:
               steps_per_episode=400,
               eval_steps=400,
               sync_steps=150,
-              torque_fraction=0.10,
+              torque_fraction=0.02,
               noise_std=0.5,
               seed=0,
           )
@@ -109,7 +109,7 @@ jobs:
                   dt=1e-3,
                   n_neurons=128,
                   seed=0,
-                  torque_fraction=0.10,
+                  torque_fraction=0.02,
                   noise_std=0.5,
                   eta=0.5,
                   feedback_gain=40.0,
@@ -167,7 +167,7 @@ jobs:
               dt=1e-3,
               n_neurons=128,
               seed=0,
-              torque_fraction=0.10,
+              torque_fraction=0.02,
               noise_std=0.5,
               eta=0.5,
               feedback_gain=40.0,
@@ -218,7 +218,7 @@ jobs:
               dt=1e-3,
               n_neurons=128,
               seed=0,
-              torque_fraction=0.10,
+              torque_fraction=0.02,
               noise_std=0.5,
           )
           try:
