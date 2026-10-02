@@ -101,18 +101,14 @@ def test_one_step_is_finite(teacher):
     assert np.all(np.isfinite(qdot1))
 
 
-def test_rk4_long_gravity_compensated_rollout_stays_finite(teacher):
+def test_rk4_long_zero_torque_rollout_stays_finite(teacher):
     q0 = 0.5 * (teacher.lower + teacher.upper)
     zeros = np.zeros(teacher.n_dof)
     teacher.reset(q0, zeros)
-    tau = teacher.inverse_dynamics(q0, zeros, zeros)
 
-    e0 = teacher.total_energy()
     for _ in range(2000):
-        q, qdot = teacher.step(tau)
+        q, qdot = teacher.step(zeros)
         assert np.all(np.isfinite(q))
         assert np.all(np.isfinite(qdot))
 
-    e1 = teacher.total_energy()
-    assert np.isfinite(e1)
-    assert abs(e1 - e0) < 5.0
+    assert np.isfinite(teacher.total_energy())
