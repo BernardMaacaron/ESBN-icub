@@ -100,7 +100,7 @@ The network receives only the additive command and teacher state during training
 - [x] Unit tests for dimensions and local update written.
 - [x] Bistable teacher/training protocol implemented.
 - [x] Multi-trial unseen-attractor acceptance metric implemented.
-- [ ] Pass the >=80% autonomous bistable acceptance criterion.
+- [x] Pass the >=80% autonomous bistable acceptance criterion (100% in CI run 191; 40 unseen trials).
 - [ ] Re-validate k=0 autonomous bistable behavior with the reviewed random-dendrite implementation.
 - [ ] Add firing-rate and raster diagnostics.
 
