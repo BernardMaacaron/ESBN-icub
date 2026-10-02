@@ -450,50 +450,52 @@ def sweep_arm_hyperparameters(
             for feedback_gain in feedback_gains:
                 for basis_mode in basis_modes:
                     teacher, experiment, normalizer, net = build_arm_experiment(
-                    dt=1e-3,
-                    n_neurons=n_neurons,
-                    seed=seed,
-                    torque_fraction=torque_fraction,
-                    noise_std=noise_std,
-                    eta=eta,
-                    feedback_gain=feedback_gain,
-                    decoder_scale=decoder_scale,
-                    basis_mode=basis_mode,
-                )
-                try:
-                    episodes = train_episodes(
-                        experiment,
-                        normalizer,
-                        net,
-                        n_episodes=n_episodes,
-                        steps_per_episode=steps_per_episode,
+                        dt=1e-3,
+                        n_neurons=n_neurons,
                         seed=seed,
-                        final_feedback_gain=max(5.0, feedback_gain / 4.0),
+                        torque_fraction=torque_fraction,
+                        noise_std=noise_std,
+                        eta=eta,
+                        feedback_gain=feedback_gain,
+                        decoder_scale=decoder_scale,
+                        basis_mode=basis_mode,
                     )
-                    result = evaluate_unseen_episode(
-                        experiment,
-                        normalizer,
-                        net,
-                        n_steps=eval_steps,
-                        sync_steps=sync_steps,
-                        seed=seed + 123,
-                    )
-                    rows.append({
-                        "eta": float(eta),
-                        "decoder_scale": (
-                            None if decoder_scale is None else float(decoder_scale)
-                        ),
-                        "feedback_gain": float(feedback_gain),
-                        "first_episode_rmse": float(episodes[0]),
-                        "last_episode_rmse": float(episodes[-1]),
-                        "sync_rmse": result["sync_rmse"],
-                        "autonomous_rmse": result["rmse"],
-                        "q_rmse": result["q_rmse"],
-                        "qdot_rmse": result["qdot_rmse"],
-                        "tau_rmse": result["tau_rmse"],
-                        "slow_weight_norm": float(np.linalg.norm(net.W_slow)),
-                    })
-                finally:
-                    teacher.close()
+                    try:
+                        episodes = train_episodes(
+                            experiment,
+                            normalizer,
+                            net,
+                            n_episodes=n_episodes,
+                            steps_per_episode=steps_per_episode,
+                            seed=seed,
+                            final_feedback_gain=max(5.0, feedback_gain / 4.0),
+                        )
+                        result = evaluate_unseen_episode(
+                            experiment,
+                            normalizer,
+                            net,
+                            n_steps=eval_steps,
+                            sync_steps=sync_steps,
+                            seed=seed + 123,
+                        )
+                        rows.append({
+                            "eta": float(eta),
+                            "decoder_scale": (
+                                None if decoder_scale is None else float(decoder_scale)
+                            ),
+                            "feedback_gain": float(feedback_gain),
+                            "basis_mode": basis_mode,
+                            "first_episode_rmse": float(episodes[0]),
+                            "last_episode_rmse": float(episodes[-1]),
+                            "sync_rmse": result["sync_rmse"],
+                            "autonomous_rmse": result["rmse"],
+                            "q_rmse": result["q_rmse"],
+                            "qdot_rmse": result["qdot_rmse"],
+                            "tau_rmse": result["tau_rmse"],
+                            "executed_steps": result["executed_steps"],
+                            "slow_weight_norm": float(np.linalg.norm(net.W_slow)),
+                        })
+                    finally:
+                        teacher.close()
 
     return rows
