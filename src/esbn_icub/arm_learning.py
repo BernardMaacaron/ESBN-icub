@@ -259,7 +259,11 @@ def train_episodes(
 
         # Synchronize the represented state before adapting W_slow.
         for _ in range(sync_steps):
-            x_t, c_t, _ = experiment.transition()
+            x_t, c_t, x_next = experiment.transition()
+            if not _inside_position_guard(x_next, teacher, margin=0.02):
+                raise RuntimeError(
+                    "Training synchronization left the legal state region"
+                )
             x_t_n = normalizer.encode_state(x_t)
             c_t_n = normalizer.encode_command(c_t)
             net.step(c_t_n, x_t_n, learn=False)
@@ -357,7 +361,7 @@ def evaluate_unseen_episode(
     sync_tail = sync_component_error[-min(50, sync_steps):]
     horizons = {}
     for horizon in (1, 5, 10, 25, 50, 100, 250, 500, 1000):
-        if horizon <= n_steps:
+        if horizon <= len(error):
             prefix = error[:horizon]
             horizons[horizon] = {
                 "rmse": float(np.sqrt(np.mean(prefix**2))),
