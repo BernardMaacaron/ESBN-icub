@@ -220,7 +220,7 @@ def train_episodes(
     position_margin=0.2,
     velocity_fraction=0.05,
     final_feedback_gain=10.0,
-    sync_steps=100,
+    sync_steps=0,
 ):
     """Train across random legal initial states with feedback annealing.
 
@@ -427,6 +427,7 @@ def sweep_arm_hyperparameters(
     etas=(0.1, 0.5, 1.0, 2.0),
     decoder_scales=(None, 0.05),
     feedback_gains=(20.0, 40.0),
+    basis_modes=("random",),
     n_neurons=128,
     n_episodes=8,
     steps_per_episode=400,
@@ -447,7 +448,8 @@ def sweep_arm_hyperparameters(
     for eta in etas:
         for decoder_scale in decoder_scales:
             for feedback_gain in feedback_gains:
-                teacher, experiment, normalizer, net = build_arm_experiment(
+                for basis_mode in basis_modes:
+                    teacher, experiment, normalizer, net = build_arm_experiment(
                     dt=1e-3,
                     n_neurons=n_neurons,
                     seed=seed,
@@ -456,6 +458,7 @@ def sweep_arm_hyperparameters(
                     eta=eta,
                     feedback_gain=feedback_gain,
                     decoder_scale=decoder_scale,
+                    basis_mode=basis_mode,
                 )
                 try:
                     episodes = train_episodes(
