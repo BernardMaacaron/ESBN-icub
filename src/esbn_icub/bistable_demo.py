@@ -111,7 +111,7 @@ def run_bistable_trials(
         nu=1e-3,
         eta=2.0,
         feedback_gain=20.0,
-        decoder_scale=0.05,
+        decoder_scale=None,
         basis_mode="random",
         seed=seed,
     )
