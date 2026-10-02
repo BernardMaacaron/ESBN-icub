@@ -191,8 +191,15 @@ def train_episodes(
     position_margin=0.2,
     velocity_fraction=0.05,
     final_feedback_gain=10.0,
+    sync_steps=100,
 ):
-    """Train across random legal initial states with feedback annealing."""
+    """Train across random legal initial states with feedback annealing.
+
+    Each episode begins with a feedback-only synchronization period. Learning
+    during the large reset transient would otherwise teach the slow weights to
+    compensate for an artificial state-initialization error rather than the
+    robot vector field.
+    """
     rng = np.random.default_rng(seed)
     teacher = experiment.teacher
 
@@ -220,6 +227,13 @@ def train_episodes(
         qdot0 = rng.uniform(-qdot_scale, qdot_scale)
         experiment.reset(q0, qdot0, excitation_seed=seed + episode)
         net.reset()
+
+        # Synchronize the represented state before adapting W_slow.
+        for _ in range(sync_steps):
+            x_t, c_t, _ = experiment.transition()
+            x_t_n = normalizer.encode_state(x_t)
+            c_t_n = normalizer.encode_command(c_t)
+            net.step(c_t_n, x_t_n, learn=False)
 
         error = train_steps(
             experiment,
