@@ -197,210 +197,164 @@ def one_teacher_step(
     return x_t, command, x_next
 
 
-def teacher_vector_field_normalized(
-    teacher: ICubTeacher,
-    scaler: StateScaler,
-    x_normalized: np.ndarray,
-    command: np.ndarray,
-    *,
-    torque_alpha: float,
-) -> np.ndarray:
-    """Exact normalized continuous-time vector field of the rigid-body teacher."""
-    x = scaler.decode_state(np.asarray(x_normalized, dtype=float))
-    n = teacher.n_dof
-    q = x[:n]
-    qdot = x[n:2*n]
-    tau = x[2*n:]
-    command_tau = np.asarray(command[2*n:], dtype=float)
-
-    qddot = teacher.acceleration(q, qdot, tau)
-    tau_dot = -torque_alpha * tau + command_tau
-    return np.concatenate([
-        qdot / scaler.q_scale,
-        qddot / scaler.qdot_scale,
-        tau_dot / scaler.torque_scale,
-    ])
-
-
-def network_vector_field_effective(
-    network: PaperEBN,
-    command_normalized: np.ndarray,
-    decoded_delta: np.ndarray | None = None,
-) -> np.ndarray:
-    """One-step effective decoded vector field around the current EBN state.
-
-    A decoded perturbation is inserted with the minimum-norm rate change that
-    satisfies D @ delta_r = decoded_delta. The original spiking state is
-    restored after the probe, so diagnostics do not alter the experiment.
-    """
-    u0 = network.u.copy()
-    r0 = network.r.copy()
-    spikes0 = network.spikes.copy()
-    gain0 = network.feedback_gain
-
-    try:
-        if decoded_delta is not None:
-            delta = np.asarray(decoded_delta, dtype=float)
-            gram = network.D @ network.D.T
-            delta_r = network.D.T @ np.linalg.solve(gram, delta)
-            network.r += delta_r
-
-        x0 = network.decoded_state.copy()
-        network.feedback_gain = 0.0
-        x1 = network.step(
-            np.asarray(command_normalized, dtype=float),
-            teacher_state=None,
-            learn=False,
-        )
-        return (x1 - x0) / network.dt
-    finally:
-        network.u[:] = u0
-        network.r[:] = r0
-        network.spikes[:] = spikes0
-        network.feedback_gain = gain0
-
-
-def _new_perturbation_accumulator(epsilons):
-    return {
-        kind: {
-            float(eps): {
-                "response_rmse": [],
-                "response_cosine": [],
-                "perturbed_field_rmse": [],
-                "teacher_growth": [],
-                "network_growth": [],
-            }
-            for eps in epsilons
-        }
-        for kind in ("q", "qdot")
-    }
-
-
-def perturbation_probe(
+def evaluate_short_rollout(
     teacher: ICubTeacher,
     scaler: StateScaler,
     driver: TorqueDriver,
     network: PaperEBN,
-    x_t: np.ndarray,
-    command: np.ndarray,
-    accumulator: dict,
+    q0: np.ndarray,
+    qdot0: np.ndarray,
     *,
+    driver_seed: int,
+    sync_steps: int,
+    test_steps: int,
+    sync_feedback_gain: float,
+) -> dict | None:
+    """Synchronize to a teacher trajectory, then evaluate a short k=0 rollout."""
+    teacher.reset(q0, qdot0)
+    gravity = teacher.inverse_dynamics(
+        q0,
+        np.zeros(teacher.n_dof),
+        np.zeros(teacher.n_dof),
+    )
+    driver.reset(gravity, seed=driver_seed)
+    network.reset_state()
+    old_gain = network.feedback_gain
+    network.feedback_gain = sync_feedback_gain
+
+    try:
+        for _ in range(sync_steps):
+            x_t, command, x_next = one_teacher_step(teacher, driver)
+            if not inside_limits(x_next[:teacher.n_dof], teacher):
+                return None
+            network.step(
+                scaler.encode_command(command),
+                scaler.encode_state(x_t),
+                learn=False,
+            )
+
+        network.feedback_gain = 0.0
+        errors = []
+        for _ in range(test_steps):
+            _, command, x_next = one_teacher_step(teacher, driver)
+            if not inside_limits(x_next[:teacher.n_dof], teacher):
+                break
+            estimate = network.step(
+                scaler.encode_command(command),
+                teacher_state=None,
+                learn=False,
+            )
+            errors.append(scaler.encode_state(x_next) - estimate)
+
+        if not errors:
+            return None
+
+        error = np.asarray(errors)
+        n = teacher.n_dof
+        return {
+            "steps": int(len(error)),
+            "rmse": float(np.sqrt(np.mean(error**2))),
+            "q_rmse": float(np.sqrt(np.mean(error[:, :n]**2))),
+            "qdot_rmse": float(np.sqrt(np.mean(error[:, n:2*n]**2))),
+            "tau_rmse": float(np.sqrt(np.mean(error[:, 2*n:]**2))),
+        }
+    finally:
+        network.feedback_gain = old_gain
+
+
+def run_neighborhood_diagnostic(
+    teacher: ICubTeacher,
+    scaler: StateScaler,
+    driver: TorqueDriver,
+    network: PaperEBN,
+    q0: np.ndarray,
+    qdot0: np.ndarray,
+    *,
+    driver_seed: int,
+    sync_steps: int,
+    test_steps: int = 25,
+    sync_feedback_gain: float,
     epsilons=(0.005, 0.01, 0.02),
-) -> float:
-    """Compare teacher and learned local responses around one synchronized state."""
-    x_n = scaler.encode_state(x_t)
-    c_n = scaler.encode_command(command)
-    f_teacher_0 = teacher_vector_field_normalized(
+) -> dict:
+    """Test k=0 prediction on nearby *real teacher trajectories*.
+
+    Perturbations are expressed in normalized state units. Each perturbed
+    initial condition is simulated by the real iCub teacher, the EBN is
+    synchronized to that trajectory using the same protocol as the main test,
+    and feedback is then removed. This avoids constructing artificial hidden
+    EBN states.
+    """
+    baseline = evaluate_short_rollout(
         teacher,
         scaler,
-        x_n,
-        command,
-        torque_alpha=driver.alpha,
+        driver,
+        network,
+        q0,
+        qdot0,
+        driver_seed=driver_seed,
+        sync_steps=sync_steps,
+        test_steps=test_steps,
+        sync_feedback_gain=sync_feedback_gain,
     )
-    f_network_0 = network_vector_field_effective(network, c_n)
-    baseline_rmse = float(np.sqrt(np.mean((f_network_0 - f_teacher_0) ** 2)))
+    if baseline is None:
+        raise RuntimeError("Neighborhood diagnostic baseline is invalid.")
 
-    n = teacher.n_dof
-    for kind, offset in (("q", 0), ("qdot", n)):
-        for eps in epsilons:
-            bucket = accumulator[kind][float(eps)]
-            for joint in range(n):
-                delta = np.zeros(3 * n)
-                delta[offset + joint] = eps
-
-                f_t_plus = teacher_vector_field_normalized(
-                    teacher,
-                    scaler,
-                    x_n + delta,
-                    command,
-                    torque_alpha=driver.alpha,
-                )
-                f_t_minus = teacher_vector_field_normalized(
-                    teacher,
-                    scaler,
-                    x_n - delta,
-                    command,
-                    torque_alpha=driver.alpha,
-                )
-                f_n_plus = network_vector_field_effective(network, c_n, delta)
-                f_n_minus = network_vector_field_effective(network, c_n, -delta)
-
-                teacher_response = (f_t_plus - f_t_minus) / (2.0 * eps)
-                network_response = (f_n_plus - f_n_minus) / (2.0 * eps)
-                response_error = network_response - teacher_response
-                bucket["response_rmse"].append(
-                    float(np.sqrt(np.mean(response_error**2)))
-                )
-
-                denom = (
-                    np.linalg.norm(teacher_response)
-                    * np.linalg.norm(network_response)
-                )
-                if denom > 1e-12:
-                    bucket["response_cosine"].append(
-                        float(
-                            np.dot(teacher_response, network_response) / denom
-                        )
-                    )
-
-                bucket["perturbed_field_rmse"].extend([
-                    float(np.sqrt(np.mean((f_n_plus - f_t_plus) ** 2))),
-                    float(np.sqrt(np.mean((f_n_minus - f_t_minus) ** 2))),
-                ])
-
-                teacher_growth_plus = np.linalg.norm(
-                    delta + network.dt * (f_t_plus - f_teacher_0)
-                ) / eps
-                teacher_growth_minus = np.linalg.norm(
-                    -delta + network.dt * (f_t_minus - f_teacher_0)
-                ) / eps
-                network_growth_plus = np.linalg.norm(
-                    delta + network.dt * (f_n_plus - f_network_0)
-                ) / eps
-                network_growth_minus = np.linalg.norm(
-                    -delta + network.dt * (f_n_minus - f_network_0)
-                ) / eps
-
-                bucket["teacher_growth"].append(
-                    float(0.5 * (teacher_growth_plus + teacher_growth_minus))
-                )
-                bucket["network_growth"].append(
-                    float(0.5 * (network_growth_plus + network_growth_minus))
-                )
-
-    return baseline_rmse
-
-
-def summarize_perturbation_diagnostic(
-    accumulator: dict,
-    baseline_errors: list[float],
-) -> dict:
-    summary = {
-        "anchors": int(len(baseline_errors)),
-        "baseline_vector_field_rmse": (
-            float(np.mean(baseline_errors)) if baseline_errors else float("nan")
-        ),
+    result = {
+        "test_steps": int(test_steps),
+        "baseline": baseline,
+        "q": {},
+        "qdot": {},
     }
-    for kind, by_eps in accumulator.items():
-        summary[kind] = {}
-        for eps, values in by_eps.items():
-            teacher_growth = float(np.mean(values["teacher_growth"]))
-            network_growth = float(np.mean(values["network_growth"]))
-            summary[kind][str(eps)] = {
-                "response_rmse": float(np.mean(values["response_rmse"])),
-                "response_cosine": (
-                    float(np.mean(values["response_cosine"]))
-                    if values["response_cosine"]
-                    else float("nan")
-                ),
-                "perturbed_field_rmse": float(
-                    np.mean(values["perturbed_field_rmse"])
-                ),
-                "teacher_growth": teacher_growth,
-                "network_growth": network_growth,
-                "excess_growth": network_growth - teacher_growth,
+    n = teacher.n_dof
+
+    for kind in ("q", "qdot"):
+        physical_scale = scaler.q_scale if kind == "q" else scaler.qdot_scale
+        for eps in epsilons:
+            trials = []
+            for joint in range(n):
+                for sign in (-1.0, 1.0):
+                    q = q0.copy()
+                    qdot = qdot0.copy()
+                    if kind == "q":
+                        q[joint] += sign * eps * physical_scale[joint]
+                        if q[joint] <= teacher.lower[joint] or q[joint] >= teacher.upper[joint]:
+                            continue
+                    else:
+                        qdot[joint] += sign * eps * physical_scale[joint]
+
+                    trial = evaluate_short_rollout(
+                        teacher,
+                        scaler,
+                        driver,
+                        network,
+                        q,
+                        qdot,
+                        driver_seed=driver_seed,
+                        sync_steps=sync_steps,
+                        test_steps=test_steps,
+                        sync_feedback_gain=sync_feedback_gain,
+                    )
+                    if trial is not None:
+                        trials.append(trial)
+
+            if not trials:
+                result[kind][str(eps)] = {"valid_trials": 0}
+                continue
+
+            mean_rmse = float(np.mean([trial["rmse"] for trial in trials]))
+            mean_q = float(np.mean([trial["q_rmse"] for trial in trials]))
+            mean_qdot = float(np.mean([trial["qdot_rmse"] for trial in trials]))
+            mean_tau = float(np.mean([trial["tau_rmse"] for trial in trials]))
+            result[kind][str(eps)] = {
+                "valid_trials": int(len(trials)),
+                "rmse": mean_rmse,
+                "q_rmse": mean_q,
+                "qdot_rmse": mean_qdot,
+                "tau_rmse": mean_tau,
+                "rmse_ratio_to_baseline": mean_rmse / baseline["rmse"],
             }
-    return summary
+
+    return result
 
 
 def run_experiment(
@@ -417,7 +371,7 @@ def run_experiment(
     torque_fraction: float = 0.02,
     seed: int = 0,
     perturbation_diagnostic: bool = False,
-    diagnostic_anchors: int = 10,
+    diagnostic_steps: int = 25,
 ) -> dict:
     """Train on iCub dynamics, switch feedback off, and test unseen motion."""
     teacher = ICubTeacher(dt=dt, integration_substeps=4)
@@ -514,46 +468,15 @@ def run_experiment(
         network.reset_state()
         network.feedback_gain = final_feedback_gain
 
-        perturbation_accumulator = _new_perturbation_accumulator(
-            (0.005, 0.01, 0.02)
-        )
-        perturbation_baseline_errors = []
-
-        for sync_index in range(sync_steps):
+        for _ in range(sync_steps):
             x_t, command, x_next = one_teacher_step(teacher, driver)
             if not inside_limits(x_next[:teacher.n_dof], teacher):
                 break
-
-            if (
-                perturbation_diagnostic
-                and sync_index >= max(0, sync_steps - diagnostic_anchors)
-            ):
-                perturbation_baseline_errors.append(
-                    perturbation_probe(
-                        teacher,
-                        scaler,
-                        driver,
-                        network,
-                        x_t,
-                        command,
-                        perturbation_accumulator,
-                    )
-                )
-
             network.step(
                 scaler.encode_command(command),
                 scaler.encode_state(x_t),
                 learn=False,
             )
-
-        perturbation_summary = (
-            summarize_perturbation_diagnostic(
-                perturbation_accumulator,
-                perturbation_baseline_errors,
-            )
-            if perturbation_diagnostic
-            else None
-        )
 
         old_gain = network.feedback_gain
         network.feedback_gain = 0.0
@@ -601,6 +524,21 @@ def run_experiment(
 
         error = teacher_norm - estimate_norm
         n = teacher.n_dof
+
+        perturbation_summary = None
+        if perturbation_diagnostic:
+            perturbation_summary = run_neighborhood_diagnostic(
+                teacher,
+                scaler,
+                driver,
+                network,
+                q0,
+                qdot0,
+                driver_seed=seed + 100000,
+                sync_steps=sync_steps,
+                test_steps=diagnostic_steps,
+                sync_feedback_gain=final_feedback_gain,
+            )
 
         horizon_rmse = {}
         for horizon in (1, 5, 10, 25, 50, 100, 200, 250):
@@ -729,7 +667,7 @@ def main() -> None:
     parser.add_argument("--eta", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--perturbation-diagnostic", action="store_true")
-    parser.add_argument("--diagnostic-anchors", type=int, default=10)
+    parser.add_argument("--diagnostic-steps", type=int, default=25)
     parser.add_argument("--no-plot", action="store_true")
     args = parser.parse_args()
 
@@ -744,7 +682,7 @@ def main() -> None:
         eta=args.eta,
         seed=args.seed,
         perturbation_diagnostic=args.perturbation_diagnostic,
-        diagnostic_anchors=args.diagnostic_anchors,
+        diagnostic_steps=args.diagnostic_steps,
     )
 
     summary = {
