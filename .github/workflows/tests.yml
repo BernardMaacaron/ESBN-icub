@@ -36,6 +36,27 @@ jobs:
             --train-steps 40 \
             --test-steps 40 \
             --no-plot
-      - name: Canonical paper-on-iCub run
+      - name: Baseline constant-feedback run
         run: |
-          python -m esbn_icub.paper_on_icub --no-plot
+          echo "EXPERIMENT baseline_constant_feedback"
+          python -m esbn_icub.paper_on_icub \
+            --feedback-gain 40 \
+            --final-feedback-gain 40 \
+            --no-plot
+      - name: Canonical annealed-feedback run
+        run: |
+          echo "EXPERIMENT canonical_annealed_feedback"
+          python -m esbn_icub.paper_on_icub \
+            --feedback-gain 40 \
+            --final-feedback-gain 10 \
+            --no-plot
+      - name: Longer-training annealed run
+        run: |
+          echo "EXPERIMENT longer_training_annealed"
+          python -m esbn_icub.paper_on_icub \
+            --train-episodes 200 \
+            --train-steps 250 \
+            --sync-steps 150 \
+            --feedback-gain 40 \
+            --final-feedback-gain 5 \
+            --no-plot
