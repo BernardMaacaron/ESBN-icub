@@ -197,6 +197,212 @@ def one_teacher_step(
     return x_t, command, x_next
 
 
+def teacher_vector_field_normalized(
+    teacher: ICubTeacher,
+    scaler: StateScaler,
+    x_normalized: np.ndarray,
+    command: np.ndarray,
+    *,
+    torque_alpha: float,
+) -> np.ndarray:
+    """Exact normalized continuous-time vector field of the rigid-body teacher."""
+    x = scaler.decode_state(np.asarray(x_normalized, dtype=float))
+    n = teacher.n_dof
+    q = x[:n]
+    qdot = x[n:2*n]
+    tau = x[2*n:]
+    command_tau = np.asarray(command[2*n:], dtype=float)
+
+    qddot = teacher.acceleration(q, qdot, tau)
+    tau_dot = -torque_alpha * tau + command_tau
+    return np.concatenate([
+        qdot / scaler.q_scale,
+        qddot / scaler.qdot_scale,
+        tau_dot / scaler.torque_scale,
+    ])
+
+
+def network_vector_field_effective(
+    network: PaperEBN,
+    command_normalized: np.ndarray,
+    decoded_delta: np.ndarray | None = None,
+) -> np.ndarray:
+    """One-step effective decoded vector field around the current EBN state.
+
+    A decoded perturbation is inserted with the minimum-norm rate change that
+    satisfies D @ delta_r = decoded_delta. The original spiking state is
+    restored after the probe, so diagnostics do not alter the experiment.
+    """
+    u0 = network.u.copy()
+    r0 = network.r.copy()
+    spikes0 = network.spikes.copy()
+    gain0 = network.feedback_gain
+
+    try:
+        if decoded_delta is not None:
+            delta = np.asarray(decoded_delta, dtype=float)
+            gram = network.D @ network.D.T
+            delta_r = network.D.T @ np.linalg.solve(gram, delta)
+            network.r += delta_r
+
+        x0 = network.decoded_state.copy()
+        network.feedback_gain = 0.0
+        x1 = network.step(
+            np.asarray(command_normalized, dtype=float),
+            teacher_state=None,
+            learn=False,
+        )
+        return (x1 - x0) / network.dt
+    finally:
+        network.u[:] = u0
+        network.r[:] = r0
+        network.spikes[:] = spikes0
+        network.feedback_gain = gain0
+
+
+def _new_perturbation_accumulator(epsilons):
+    return {
+        kind: {
+            float(eps): {
+                "response_rmse": [],
+                "response_cosine": [],
+                "perturbed_field_rmse": [],
+                "teacher_growth": [],
+                "network_growth": [],
+            }
+            for eps in epsilons
+        }
+        for kind in ("q", "qdot")
+    }
+
+
+def perturbation_probe(
+    teacher: ICubTeacher,
+    scaler: StateScaler,
+    driver: TorqueDriver,
+    network: PaperEBN,
+    x_t: np.ndarray,
+    command: np.ndarray,
+    accumulator: dict,
+    *,
+    epsilons=(0.005, 0.01, 0.02),
+) -> float:
+    """Compare teacher and learned local responses around one synchronized state."""
+    x_n = scaler.encode_state(x_t)
+    c_n = scaler.encode_command(command)
+    f_teacher_0 = teacher_vector_field_normalized(
+        teacher,
+        scaler,
+        x_n,
+        command,
+        torque_alpha=driver.alpha,
+    )
+    f_network_0 = network_vector_field_effective(network, c_n)
+    baseline_rmse = float(np.sqrt(np.mean((f_network_0 - f_teacher_0) ** 2)))
+
+    n = teacher.n_dof
+    for kind, offset in (("q", 0), ("qdot", n)):
+        for eps in epsilons:
+            bucket = accumulator[kind][float(eps)]
+            for joint in range(n):
+                delta = np.zeros(3 * n)
+                delta[offset + joint] = eps
+
+                f_t_plus = teacher_vector_field_normalized(
+                    teacher,
+                    scaler,
+                    x_n + delta,
+                    command,
+                    torque_alpha=driver.alpha,
+                )
+                f_t_minus = teacher_vector_field_normalized(
+                    teacher,
+                    scaler,
+                    x_n - delta,
+                    command,
+                    torque_alpha=driver.alpha,
+                )
+                f_n_plus = network_vector_field_effective(network, c_n, delta)
+                f_n_minus = network_vector_field_effective(network, c_n, -delta)
+
+                teacher_response = (f_t_plus - f_t_minus) / (2.0 * eps)
+                network_response = (f_n_plus - f_n_minus) / (2.0 * eps)
+                response_error = network_response - teacher_response
+                bucket["response_rmse"].append(
+                    float(np.sqrt(np.mean(response_error**2)))
+                )
+
+                denom = (
+                    np.linalg.norm(teacher_response)
+                    * np.linalg.norm(network_response)
+                )
+                if denom > 1e-12:
+                    bucket["response_cosine"].append(
+                        float(
+                            np.dot(teacher_response, network_response) / denom
+                        )
+                    )
+
+                bucket["perturbed_field_rmse"].extend([
+                    float(np.sqrt(np.mean((f_n_plus - f_t_plus) ** 2))),
+                    float(np.sqrt(np.mean((f_n_minus - f_t_minus) ** 2))),
+                ])
+
+                teacher_growth_plus = np.linalg.norm(
+                    delta + network.dt * (f_t_plus - f_teacher_0)
+                ) / eps
+                teacher_growth_minus = np.linalg.norm(
+                    -delta + network.dt * (f_t_minus - f_teacher_0)
+                ) / eps
+                network_growth_plus = np.linalg.norm(
+                    delta + network.dt * (f_n_plus - f_network_0)
+                ) / eps
+                network_growth_minus = np.linalg.norm(
+                    -delta + network.dt * (f_n_minus - f_network_0)
+                ) / eps
+
+                bucket["teacher_growth"].append(
+                    float(0.5 * (teacher_growth_plus + teacher_growth_minus))
+                )
+                bucket["network_growth"].append(
+                    float(0.5 * (network_growth_plus + network_growth_minus))
+                )
+
+    return baseline_rmse
+
+
+def summarize_perturbation_diagnostic(
+    accumulator: dict,
+    baseline_errors: list[float],
+) -> dict:
+    summary = {
+        "anchors": int(len(baseline_errors)),
+        "baseline_vector_field_rmse": (
+            float(np.mean(baseline_errors)) if baseline_errors else float("nan")
+        ),
+    }
+    for kind, by_eps in accumulator.items():
+        summary[kind] = {}
+        for eps, values in by_eps.items():
+            teacher_growth = float(np.mean(values["teacher_growth"]))
+            network_growth = float(np.mean(values["network_growth"]))
+            summary[kind][str(eps)] = {
+                "response_rmse": float(np.mean(values["response_rmse"])),
+                "response_cosine": (
+                    float(np.mean(values["response_cosine"]))
+                    if values["response_cosine"]
+                    else float("nan")
+                ),
+                "perturbed_field_rmse": float(
+                    np.mean(values["perturbed_field_rmse"])
+                ),
+                "teacher_growth": teacher_growth,
+                "network_growth": network_growth,
+                "excess_growth": network_growth - teacher_growth,
+            }
+    return summary
+
+
 def run_experiment(
     *,
     dt: float = 1e-3,
@@ -210,6 +416,8 @@ def run_experiment(
     eta: float = 0.05,
     torque_fraction: float = 0.02,
     seed: int = 0,
+    perturbation_diagnostic: bool = False,
+    diagnostic_anchors: int = 10,
 ) -> dict:
     """Train on iCub dynamics, switch feedback off, and test unseen motion."""
     teacher = ICubTeacher(dt=dt, integration_substeps=4)
@@ -306,15 +514,46 @@ def run_experiment(
         network.reset_state()
         network.feedback_gain = final_feedback_gain
 
-        for _ in range(sync_steps):
+        perturbation_accumulator = _new_perturbation_accumulator(
+            (0.005, 0.01, 0.02)
+        )
+        perturbation_baseline_errors = []
+
+        for sync_index in range(sync_steps):
             x_t, command, x_next = one_teacher_step(teacher, driver)
             if not inside_limits(x_next[:teacher.n_dof], teacher):
                 break
+
+            if (
+                perturbation_diagnostic
+                and sync_index >= max(0, sync_steps - diagnostic_anchors)
+            ):
+                perturbation_baseline_errors.append(
+                    perturbation_probe(
+                        teacher,
+                        scaler,
+                        driver,
+                        network,
+                        x_t,
+                        command,
+                        perturbation_accumulator,
+                    )
+                )
+
             network.step(
                 scaler.encode_command(command),
                 scaler.encode_state(x_t),
                 learn=False,
             )
+
+        perturbation_summary = (
+            summarize_perturbation_diagnostic(
+                perturbation_accumulator,
+                perturbation_baseline_errors,
+            )
+            if perturbation_diagnostic
+            else None
+        )
 
         old_gain = network.feedback_gain
         network.feedback_gain = 0.0
@@ -396,6 +635,7 @@ def run_experiment(
             "spike_times": np.asarray(spike_times),
             "spike_neurons": np.asarray(spike_rows, dtype=int),
             "slow_weight_norm": float(np.linalg.norm(network.W_slow)),
+            "perturbation_diagnostic": perturbation_summary,
         }
     finally:
         teacher.close()
@@ -488,6 +728,8 @@ def main() -> None:
     parser.add_argument("--final-feedback-gain", type=float, default=10.0)
     parser.add_argument("--eta", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--perturbation-diagnostic", action="store_true")
+    parser.add_argument("--diagnostic-anchors", type=int, default=10)
     parser.add_argument("--no-plot", action="store_true")
     args = parser.parse_args()
 
@@ -501,6 +743,8 @@ def main() -> None:
         final_feedback_gain=args.final_feedback_gain,
         eta=args.eta,
         seed=args.seed,
+        perturbation_diagnostic=args.perturbation_diagnostic,
+        diagnostic_anchors=args.diagnostic_anchors,
     )
 
     summary = {
@@ -513,6 +757,7 @@ def main() -> None:
         "horizon_rmse": result["horizon_rmse"],
         "feedback_start": result["feedback_start"],
         "feedback_final": result["feedback_final"],
+        "perturbation_diagnostic": result["perturbation_diagnostic"],
     }
     print(json.dumps(summary, indent=2))
 
