@@ -36,6 +36,12 @@ jobs:
             --train-steps 40 \
             --test-steps 40 \
             --no-plot
+      - name: Untrained autonomous baseline
+        run: |
+          echo "EXPERIMENT untrained_baseline"
+          python -m esbn_icub.paper_on_icub \
+            --train-episodes 0 \
+            --no-plot
       - name: Baseline constant-feedback run
         run: |
           echo "EXPERIMENT baseline_constant_feedback"
