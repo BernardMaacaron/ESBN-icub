@@ -49,7 +49,7 @@ jobs:
             --feedback-gain 40 \
             --final-feedback-gain 40 \
             --perturbation-diagnostic \
-            --diagnostic-anchors 10 \
+            --diagnostic-steps 25 \
             --no-plot
       - name: Baseline constant-feedback run
         run: |
