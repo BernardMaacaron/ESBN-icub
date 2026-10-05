@@ -22,7 +22,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: sudo apt-get update && sudo apt-get install -y libgl1
+      - name: Install Pinocchio URDF dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liburdfdom-dev
       - run: pip install -e ".[test,robot]"
       - run: pytest -q tests/test_icub_teacher.py tests/test_paper_on_icub.py
       - name: End-to-end smoke run
@@ -33,3 +36,6 @@ jobs:
             --train-steps 40 \
             --test-steps 40 \
             --no-plot
+      - name: Canonical paper-on-iCub run
+        run: |
+          python -m esbn_icub.paper_on_icub --no-plot
