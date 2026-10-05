@@ -38,10 +38,7 @@ class ICubTeacher:
         if icub_models is None:
             raise ImportError("icub-models is required: pip install -e '.[robot]'")
         if gui:
-            raise ValueError(
-                "ICubTeacher is a rigid-body dynamics teacher, not a GUI simulator. "
-                "Use the optional Bullet tooling only for visualization/cross-checks."
-            )
+            raise ValueError("GUI mode is not supported by the Pinocchio teacher.")
 
         self.dt = float(dt)
         self.integration_substeps = int(integration_substeps)
@@ -108,6 +105,10 @@ class ICubTeacher:
     @property
     def n_dof(self):
         return int(self.model.nv)
+
+    @property
+    def active_joint_names(self):
+        return RIGHT_ARM_JOINTS
 
     def close(self):
         """Compatibility no-op; Pinocchio owns no external simulator process."""
