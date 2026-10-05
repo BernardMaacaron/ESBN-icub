@@ -1,5 +1,5 @@
-"""ESBN-iCub research code."""
+"""Paper EBN applied to iCub arm dynamics."""
 
-from .alemi_ebn import AlemiEBN
+from .paper_network import PaperEBN
 
-__all__ = ["AlemiEBN"]
+__all__ = ["PaperEBN"]
