@@ -357,6 +357,183 @@ def run_neighborhood_diagnostic(
     return result
 
 
+def _probe_one_step_k0(
+    network: PaperEBN,
+    command_normalized: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (state_before, state_after_one_k0_step) without altering the EBN."""
+    u0 = network.u.copy()
+    r0 = network.r.copy()
+    spikes0 = network.spikes.copy()
+    gain0 = network.feedback_gain
+    try:
+        state_before = network.decoded_state.copy()
+        network.feedback_gain = 0.0
+        state_after = network.step(
+            np.asarray(command_normalized, dtype=float),
+            teacher_state=None,
+            learn=False,
+        )
+        return state_before, state_after
+    finally:
+        network.u[:] = u0
+        network.r[:] = r0
+        network.spikes[:] = spikes0
+        network.feedback_gain = gain0
+
+
+def run_one_step_residual_diagnostic(
+    teacher: ICubTeacher,
+    scaler: StateScaler,
+    driver: TorqueDriver,
+    network: PaperEBN,
+    *,
+    seed: int,
+    sync_steps: int,
+    feedback_gain: float,
+    episodes: int = 20,
+    anchors_per_episode: int = 20,
+) -> dict:
+    """Measure k=0 one-step dynamics residuals at synchronized unseen states.
+
+    The EBN is synchronized with teacher feedback but not trained. At each
+    anchor we temporarily remove feedback for exactly one step, compare the
+    resulting decoded change with the teacher's true change, restore the EBN,
+    then continue synchronization. This isolates the learned autonomous
+    dynamics from long-horizon error accumulation.
+    """
+    rng = np.random.default_rng(seed)
+    n = teacher.n_dof
+    next_errors = []
+    increment_errors = []
+    start_errors = []
+
+    for episode in range(episodes):
+        q0, qdot0 = sample_initial_state(teacher, scaler, rng)
+        teacher.reset(q0, qdot0)
+        gravity = teacher.inverse_dynamics(
+            q0,
+            np.zeros(n),
+            np.zeros(n),
+        )
+        driver.reset(gravity, seed=seed + 1000 + episode)
+        network.reset_state()
+        old_gain = network.feedback_gain
+        network.feedback_gain = feedback_gain
+
+        try:
+            for _ in range(sync_steps):
+                x_t, command, x_next = one_teacher_step(teacher, driver)
+                if not inside_limits(x_next[:n], teacher):
+                    break
+                network.step(
+                    scaler.encode_command(command),
+                    scaler.encode_state(x_t),
+                    learn=False,
+                )
+
+            for _ in range(anchors_per_episode):
+                x_t, command, x_next = one_teacher_step(teacher, driver)
+                if not inside_limits(x_next[:n], teacher):
+                    break
+
+                x_t_n = scaler.encode_state(x_t)
+                x_next_n = scaler.encode_state(x_next)
+                c_n = scaler.encode_command(command)
+
+                xhat_t, xhat_next = _probe_one_step_k0(network, c_n)
+                start_errors.append(x_t_n - xhat_t)
+                next_errors.append(x_next_n - xhat_next)
+                increment_errors.append(
+                    (x_next_n - x_t_n) - (xhat_next - xhat_t)
+                )
+
+                # Resume the real synchronized teacher/student trajectory.
+                network.step(c_n, x_t_n, learn=False)
+        finally:
+            network.feedback_gain = old_gain
+
+    if not next_errors:
+        raise RuntimeError("No valid states collected for one-step diagnostic.")
+
+    next_errors = np.asarray(next_errors)
+    increment_errors = np.asarray(increment_errors)
+    start_errors = np.asarray(start_errors)
+
+    scales = np.concatenate([
+        scaler.q_scale,
+        scaler.qdot_scale,
+        scaler.torque_scale,
+    ])
+    physical_increment_errors = increment_errors * scales
+    names = (
+        [f"q:{name}" for name in teacher.active_joint_names]
+        + [f"qdot:{name}" for name in teacher.active_joint_names]
+        + [f"tau:{name}" for name in teacher.active_joint_names]
+    )
+
+    per_dimension = {}
+    for i, name in enumerate(names):
+        per_dimension[name] = {
+            "next_state_rmse_normalized": float(
+                np.sqrt(np.mean(next_errors[:, i] ** 2))
+            ),
+            "increment_bias_normalized": float(
+                np.mean(increment_errors[:, i])
+            ),
+            "increment_rmse_normalized": float(
+                np.sqrt(np.mean(increment_errors[:, i] ** 2))
+            ),
+            "increment_rmse_physical": float(
+                np.sqrt(np.mean(physical_increment_errors[:, i] ** 2))
+            ),
+            "derivative_rmse_normalized_per_s": float(
+                np.sqrt(np.mean(increment_errors[:, i] ** 2)) / network.dt
+            ),
+        }
+
+    def group_summary(sl):
+        return {
+            "next_state_rmse_normalized": float(
+                np.sqrt(np.mean(next_errors[:, sl] ** 2))
+            ),
+            "increment_rmse_normalized": float(
+                np.sqrt(np.mean(increment_errors[:, sl] ** 2))
+            ),
+            "increment_bias_norm_normalized": float(
+                np.linalg.norm(np.mean(increment_errors[:, sl], axis=0))
+            ),
+        }
+
+    ranking = sorted(
+        (
+            (name, metrics["increment_rmse_normalized"])
+            for name, metrics in per_dimension.items()
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+
+    return {
+        "samples": int(len(next_errors)),
+        "episodes_requested": int(episodes),
+        "anchors_per_episode": int(anchors_per_episode),
+        "start_representation_rmse_normalized": float(
+            np.sqrt(np.mean(start_errors**2))
+        ),
+        "groups": {
+            "q": group_summary(slice(0, n)),
+            "qdot": group_summary(slice(n, 2 * n)),
+            "tau": group_summary(slice(2 * n, 3 * n)),
+        },
+        "worst_dimensions": [
+            {"name": name, "increment_rmse_normalized": float(value)}
+            for name, value in ranking[:10]
+        ],
+        "per_dimension": per_dimension,
+    }
+
+
 def run_experiment(
     *,
     dt: float = 1e-3,
@@ -372,6 +549,9 @@ def run_experiment(
     seed: int = 0,
     perturbation_diagnostic: bool = False,
     diagnostic_steps: int = 25,
+    one_step_diagnostic: bool = False,
+    residual_episodes: int = 20,
+    residual_anchors: int = 20,
 ) -> dict:
     """Train on iCub dynamics, switch feedback off, and test unseen motion."""
     teacher = ICubTeacher(dt=dt, integration_substeps=4)
@@ -540,6 +720,20 @@ def run_experiment(
                 sync_feedback_gain=final_feedback_gain,
             )
 
+        one_step_summary = None
+        if one_step_diagnostic:
+            one_step_summary = run_one_step_residual_diagnostic(
+                teacher,
+                scaler,
+                driver,
+                network,
+                seed=seed + 200000,
+                sync_steps=sync_steps,
+                feedback_gain=final_feedback_gain,
+                episodes=residual_episodes,
+                anchors_per_episode=residual_anchors,
+            )
+
         horizon_rmse = {}
         for horizon in (1, 5, 10, 25, 50, 100, 200, 250):
             if horizon <= len(error):
@@ -574,6 +768,7 @@ def run_experiment(
             "spike_neurons": np.asarray(spike_rows, dtype=int),
             "slow_weight_norm": float(np.linalg.norm(network.W_slow)),
             "perturbation_diagnostic": perturbation_summary,
+            "one_step_residual_diagnostic": one_step_summary,
         }
     finally:
         teacher.close()
@@ -668,6 +863,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--perturbation-diagnostic", action="store_true")
     parser.add_argument("--diagnostic-steps", type=int, default=25)
+    parser.add_argument("--one-step-diagnostic", action="store_true")
+    parser.add_argument("--residual-episodes", type=int, default=20)
+    parser.add_argument("--residual-anchors", type=int, default=20)
     parser.add_argument("--no-plot", action="store_true")
     args = parser.parse_args()
 
@@ -683,6 +881,9 @@ def main() -> None:
         seed=args.seed,
         perturbation_diagnostic=args.perturbation_diagnostic,
         diagnostic_steps=args.diagnostic_steps,
+        one_step_diagnostic=args.one_step_diagnostic,
+        residual_episodes=args.residual_episodes,
+        residual_anchors=args.residual_anchors,
     )
 
     summary = {
@@ -696,6 +897,9 @@ def main() -> None:
         "feedback_start": result["feedback_start"],
         "feedback_final": result["feedback_final"],
         "perturbation_diagnostic": result["perturbation_diagnostic"],
+        "one_step_residual_diagnostic": result[
+            "one_step_residual_diagnostic"
+        ],
     }
     print(json.dumps(summary, indent=2))
 
