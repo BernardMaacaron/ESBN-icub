@@ -292,7 +292,10 @@ def run_experiment(
             )
 
         # TEST: unseen initial state/input, learning OFF, k=0 after sync.
-        q0, qdot0 = sample_initial_state(teacher, scaler, rng)
+        # Use an independent fixed RNG so comparisons with different training
+        # lengths are evaluated on exactly the same test initial condition.
+        eval_rng = np.random.default_rng(seed + 100000)
+        q0, qdot0 = sample_initial_state(teacher, scaler, eval_rng)
         teacher.reset(q0, qdot0)
         gravity = teacher.inverse_dynamics(
             q0,
