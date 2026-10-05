@@ -206,6 +206,7 @@ def run_experiment(
     sync_steps: int = 75,
     test_steps: int = 250,
     feedback_gain: float = 40.0,
+    final_feedback_gain: float = 10.0,
     eta: float = 0.05,
     torque_fraction: float = 0.02,
     seed: int = 0,
@@ -233,8 +234,17 @@ def run_experiment(
     training_rmse = []
 
     try:
-        # TRAINING: paper error feedback ON, local W_slow learning ON.
+        # TRAINING: start with strong teacher feedback and reduce it as
+        # learning proceeds, following the procedure described in the paper.
         for episode in range(train_episodes):
+            if train_episodes <= 1:
+                network.feedback_gain = final_feedback_gain
+            else:
+                fraction = episode / (train_episodes - 1)
+                network.feedback_gain = (
+                    feedback_gain
+                    + fraction * (final_feedback_gain - feedback_gain)
+                )
             q0, qdot0 = sample_initial_state(teacher, scaler, rng)
             teacher.reset(q0, qdot0)
             gravity = teacher.inverse_dynamics(
@@ -291,6 +301,7 @@ def run_experiment(
         )
         driver.reset(gravity, seed=seed + 100000)
         network.reset_state()
+        network.feedback_gain = final_feedback_gain
 
         for _ in range(sync_steps):
             x_t, command, x_next = one_teacher_step(teacher, driver)
@@ -349,6 +360,21 @@ def run_experiment(
         error = teacher_norm - estimate_norm
         n = teacher.n_dof
 
+        horizon_rmse = {}
+        for horizon in (1, 5, 10, 25, 50, 100, 200, 250):
+            if horizon <= len(error):
+                prefix = error[:horizon]
+                horizon_rmse[horizon] = {
+                    "rmse": float(np.sqrt(np.mean(prefix**2))),
+                    "q_rmse": float(np.sqrt(np.mean(prefix[:, :n]**2))),
+                    "qdot_rmse": float(
+                        np.sqrt(np.mean(prefix[:, n:2*n]**2))
+                    ),
+                    "tau_rmse": float(
+                        np.sqrt(np.mean(prefix[:, 2*n:]**2))
+                    ),
+                }
+
         return {
             "dt": dt,
             "joint_names": list(teacher.active_joint_names),
@@ -361,6 +387,9 @@ def run_experiment(
             "qdot_rmse": float(np.sqrt(np.mean(error[:, n:2*n]**2))),
             "tau_rmse": float(np.sqrt(np.mean(error[:, 2*n:]**2))),
             "executed_test_steps": int(len(error)),
+            "horizon_rmse": horizon_rmse,
+            "feedback_start": float(feedback_gain),
+            "feedback_final": float(final_feedback_gain),
             "spike_times": np.asarray(spike_times),
             "spike_neurons": np.asarray(spike_rows, dtype=int),
             "slow_weight_norm": float(np.linalg.norm(network.W_slow)),
@@ -451,6 +480,10 @@ def main() -> None:
     parser.add_argument("--train-episodes", type=int, default=30)
     parser.add_argument("--train-steps", type=int, default=250)
     parser.add_argument("--test-steps", type=int, default=250)
+    parser.add_argument("--sync-steps", type=int, default=75)
+    parser.add_argument("--feedback-gain", type=float, default=40.0)
+    parser.add_argument("--final-feedback-gain", type=float, default=10.0)
+    parser.add_argument("--eta", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-plot", action="store_true")
     args = parser.parse_args()
@@ -459,7 +492,11 @@ def main() -> None:
         n_neurons=args.neurons,
         train_episodes=args.train_episodes,
         train_steps=args.train_steps,
+        sync_steps=args.sync_steps,
         test_steps=args.test_steps,
+        feedback_gain=args.feedback_gain,
+        final_feedback_gain=args.final_feedback_gain,
+        eta=args.eta,
         seed=args.seed,
     )
 
@@ -470,6 +507,9 @@ def main() -> None:
         "tau_rmse": result["tau_rmse"],
         "executed_test_steps": result["executed_test_steps"],
         "slow_weight_norm": result["slow_weight_norm"],
+        "horizon_rmse": result["horizon_rmse"],
+        "feedback_start": result["feedback_start"],
+        "feedback_final": result["feedback_final"],
     }
     print(json.dumps(summary, indent=2))
 
