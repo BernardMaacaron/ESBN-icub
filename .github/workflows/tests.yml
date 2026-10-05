@@ -42,6 +42,15 @@ jobs:
           python -m esbn_icub.paper_on_icub \
             --train-episodes 0 \
             --no-plot
+      - name: Local perturbation diagnostic
+        run: |
+          echo "EXPERIMENT local_perturbation_diagnostic"
+          python -m esbn_icub.paper_on_icub \
+            --feedback-gain 40 \
+            --final-feedback-gain 40 \
+            --perturbation-diagnostic \
+            --diagnostic-anchors 10 \
+            --no-plot
       - name: Baseline constant-feedback run
         run: |
           echo "EXPERIMENT baseline_constant_feedback"
