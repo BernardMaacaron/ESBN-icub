@@ -51,6 +51,16 @@ jobs:
             --perturbation-diagnostic \
             --diagnostic-steps 100 \
             --no-plot
+      - name: One-step residual diagnostic
+        run: |
+          echo "EXPERIMENT one_step_residual_diagnostic"
+          python -m esbn_icub.paper_on_icub \
+            --feedback-gain 40 \
+            --final-feedback-gain 40 \
+            --one-step-diagnostic \
+            --residual-episodes 20 \
+            --residual-anchors 20 \
+            --no-plot
       - name: Baseline constant-feedback run
         run: |
           echo "EXPERIMENT baseline_constant_feedback"
