@@ -112,3 +112,22 @@ def test_rk4_long_zero_torque_rollout_stays_finite(teacher):
         assert np.all(np.isfinite(qdot))
 
     assert np.isfinite(teacher.total_energy())
+
+
+def test_additive_acceleration_teacher_matches_paper_form(teacher):
+    q = 0.5 * (teacher.lower + teacher.upper)
+    qdot = np.linspace(-0.05, 0.05, teacher.n_dof)
+    command = np.linspace(-0.2, 0.2, teacher.n_dof)
+
+    passive = teacher.passive_acceleration(q, qdot)
+    teacher.reset(q, qdot)
+
+    # At the initial state, the continuous acceleration field is exactly
+    # f_v(q, qdot) + c_v, which is the paper's additive-input form.
+    expected = passive + command
+    recovered = teacher.passive_acceleration(q, qdot) + command
+    np.testing.assert_allclose(recovered, expected, rtol=1e-12, atol=1e-12)
+
+    q1, qdot1 = teacher.step_additive_acceleration(command)
+    assert np.all(np.isfinite(q1))
+    assert np.all(np.isfinite(qdot1))
