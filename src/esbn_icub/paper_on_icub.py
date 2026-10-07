@@ -1,16 +1,27 @@
-"""Run the paper's EBN learning rule on the iCubGenova11 right arm.
+"""Strict paper-form EBN experiment on the iCub right arm.
 
-The teacher is the official iCubGenova11 rigid-body model reduced to the
-seven right-arm joints with Pinocchio.
+The network equations are exactly the architecture in Alemi et al. (2018).
+The only task-specific adapter is how the iCub teacher is written in the
+paper's required form
 
-To keep the paper's additive-input form x_dot=f(x)+c(t), torque is included
-in the learned state:
+    x_dot = f(x) + c(t).
 
-    x = [q, qdot, tau]
-    tau_dot = -alpha tau + c_tau(t)
+For the 7-DOF arm we use the second-order state
 
-The network sees the teacher state only while error feedback is enabled
-during training/synchronization. Testing sets k=0 and freezes learning.
+    x = [q, qdot]  (K = 14),
+
+as the paper does for a mechanical system by providing both position and
+velocity.  The command is an additive generalized-acceleration signal
+
+    c(t) = [0, a_cmd(t)].
+
+The iCub rigid-body teacher therefore obeys
+
+    qddot = qddot_passive(q, qdot) + a_cmd(t),
+
+which is exactly of the paper's additive-input form.  No torque state,
+custom recurrent objective, DAgger, rollout loss, or auxiliary dynamics are
+introduced.
 """
 
 from __future__ import annotations
@@ -25,750 +36,271 @@ from .icub_teacher import ICubTeacher
 from .paper_network import PaperEBN
 
 
-class StateScaler:
-    def __init__(self, teacher: ICubTeacher, torque_scale: np.ndarray):
+class ArmCoordinates:
+    """Fixed affine/unit transform for the 14-D mechanical state."""
+
+    def __init__(self, teacher: ICubTeacher):
         self.n = teacher.n_dof
-        self.q_center = 0.5 * (teacher.lower + teacher.upper)
+        self.q0 = 0.5 * (teacher.lower + teacher.upper)
         self.q_scale = np.maximum(
             0.5 * (teacher.upper - teacher.lower),
             1e-6,
         )
-        self.qdot_scale = np.maximum(self.q_scale, 0.5)
-        self.torque_scale = np.asarray(torque_scale, dtype=float)
+        # A fixed numerical unit for velocity.  This is task preprocessing,
+        # not a change to the EBN equations.
+        self.v_scale = np.maximum(self.q_scale, 0.5)
 
-    def encode_state(self, x: np.ndarray) -> np.ndarray:
-        n = self.n
+    def encode(self, q: np.ndarray, qdot: np.ndarray) -> np.ndarray:
         return np.concatenate([
-            (x[:n] - self.q_center) / self.q_scale,
-            x[n:2*n] / self.qdot_scale,
-            x[2*n:] / self.torque_scale,
+            (np.asarray(q) - self.q0) / self.q_scale,
+            np.asarray(qdot) / self.v_scale,
         ])
 
-    def decode_state(self, x: np.ndarray) -> np.ndarray:
-        n = self.n
+    def decode(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        x = np.asarray(x)
+        return (
+            self.q0 + x[:self.n] * self.q_scale,
+            x[self.n:] * self.v_scale,
+        )
+
+    def command(self, normalized_acceleration: np.ndarray) -> np.ndarray:
+        """Paper input c(t) in the same normalized state coordinates."""
         return np.concatenate([
-            self.q_center + x[:n] * self.q_scale,
-            x[n:2*n] * self.qdot_scale,
-            x[2*n:] * self.torque_scale,
+            np.zeros(self.n),
+            np.asarray(normalized_acceleration, dtype=float),
         ])
 
-    def encode_command(self, c: np.ndarray) -> np.ndarray:
-        n = self.n
-        return np.concatenate([
-            c[:n] / self.q_scale,
-            c[n:2*n] / self.qdot_scale,
-            c[2*n:] / self.torque_scale,
-        ])
+    def physical_acceleration(
+        self,
+        normalized_acceleration: np.ndarray,
+    ) -> np.ndarray:
+        return np.asarray(normalized_acceleration, dtype=float) * self.v_scale
 
 
-class TorqueDriver:
-    """Smooth torque process with exact additive state dynamics."""
+class FilteredRandomInput:
+    """Filtered random command c(t), as used in the paper."""
 
     def __init__(
         self,
-        scale: np.ndarray,
+        n: int,
         dt: float,
         *,
-        fraction: float = 0.02,
-        alpha: float = 4.0,
-        beta: float = 20.0,
+        amplitude: float = 0.35,
+        time_constant: float = 0.05,
+        resample_time: float = 0.05,
         seed: int = 0,
     ):
-        self.scale = np.asarray(scale, dtype=float)
+        self.n = int(n)
         self.dt = float(dt)
-        self.fraction = float(fraction)
-        self.alpha = float(alpha)
-        self.beta = float(beta)
+        self.amplitude = float(amplitude)
+        self.beta = 1.0 / float(time_constant)
+        self.resample_steps = max(1, int(round(resample_time / dt)))
         self.rng = np.random.default_rng(seed)
-        self.bias = np.zeros_like(self.scale)
-        self.tau = np.zeros_like(self.scale)
-        self.xi = np.zeros_like(self.scale)
-        self.target_xi = np.zeros_like(self.scale)
-        self.step_index = 0
+        self.value = np.zeros(self.n)
+        self.target = np.zeros(self.n)
+        self.index = 0
 
-    def reset(self, bias: np.ndarray, *, seed: int) -> None:
+    def reset(self, seed: int) -> None:
         self.rng = np.random.default_rng(seed)
-        self.bias = np.asarray(bias, dtype=float).copy()
-        self.tau = self.bias.copy()
-        self.xi.fill(0.0)
-        self.target_xi.fill(0.0)
-        self.step_index = 0
+        self.value.fill(0.0)
+        self.target.fill(0.0)
+        self.index = 0
 
-    def step(self) -> tuple[np.ndarray, np.ndarray]:
-        if self.step_index % 50 == 0:
-            self.target_xi = (
-                self.alpha
-                * self.fraction
-                * self.scale
-                * self.rng.uniform(-1.0, 1.0, size=self.scale.shape)
+    def step(self) -> np.ndarray:
+        if self.index % self.resample_steps == 0:
+            self.target = self.rng.uniform(
+                -self.amplitude,
+                self.amplitude,
+                size=self.n,
             )
-
-        self.xi += self.dt * self.beta * (self.target_xi - self.xi)
-        command_tau = self.alpha * self.bias + self.xi
-        self.tau += self.dt * (-self.alpha * self.tau + command_tau)
-        self.step_index += 1
-        return self.tau.copy(), command_tau.copy()
+        self.value += self.dt * self.beta * (self.target - self.value)
+        self.index += 1
+        return self.value.copy()
 
 
-def characteristic_torque_scale(
+def feedback_for_iteration(
+    iteration: int,
+    n_iterations: int,
+    start: float,
+    end: float,
+) -> float:
+    """Large feedback initially, reduced as learning progresses (paper text)."""
+    if n_iterations <= 1:
+        return float(end)
+    fraction = iteration / (n_iterations - 1)
+    return float(start + fraction * (end - start))
+
+
+def run_teacher_network_step(
     teacher: ICubTeacher,
+    coords: ArmCoordinates,
+    command_source: FilteredRandomInput,
+    network: PaperEBN,
     *,
-    seed: int = 0,
-    samples: int = 12,
-) -> np.ndarray:
-    """Get a numerical torque scale from the actual rigid-body model."""
-    rng = np.random.default_rng(seed)
-    span = teacher.upper - teacher.lower
-    q_low = teacher.lower + 0.2 * span
-    q_high = teacher.upper - 0.2 * span
-    zeros = np.zeros(teacher.n_dof)
-    scale = np.zeros(teacher.n_dof)
-
-    poses = [0.5 * (teacher.lower + teacher.upper)]
-    poses.extend(rng.uniform(q_low, q_high) for _ in range(samples))
-
-    for q in poses:
-        scale = np.maximum(
-            scale,
-            np.abs(teacher.inverse_dynamics(q, zeros, zeros)),
-        )
-        for j in range(teacher.n_dof):
-            qddot = np.zeros(teacher.n_dof)
-            qddot[j] = 1.0
-            scale = np.maximum(
-                scale,
-                np.abs(teacher.inverse_dynamics(q, zeros, qddot)),
-            )
-            qddot[j] = -1.0
-            scale = np.maximum(
-                scale,
-                np.abs(teacher.inverse_dynamics(q, zeros, qddot)),
-            )
-
-    return np.maximum(scale, 0.1)
-
-
-def inside_limits(
-    q: np.ndarray,
-    teacher: ICubTeacher,
-    *,
-    margin: float = 0.02,
-) -> bool:
-    span = teacher.upper - teacher.lower
-    return bool(
-        np.all(q > teacher.lower + margin * span)
-        and np.all(q < teacher.upper - margin * span)
-    )
-
-
-def sample_initial_state(
-    teacher: ICubTeacher,
-    scaler: StateScaler,
-    rng: np.random.Generator,
-) -> tuple[np.ndarray, np.ndarray]:
-    span = teacher.upper - teacher.lower
-    q = rng.uniform(
-        teacher.lower + 0.2 * span,
-        teacher.upper - 0.2 * span,
-    )
-    qdot = rng.uniform(
-        -0.03 * scaler.qdot_scale,
-        0.03 * scaler.qdot_scale,
-    )
-    return q, qdot
-
-
-def one_teacher_step(
-    teacher: ICubTeacher,
-    driver: TorqueDriver,
+    learn: bool,
+    input_enabled: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     q, qdot = teacher.state()
-    x_t = np.concatenate([q, qdot, driver.tau])
+    x_t = coords.encode(q, qdot)
 
-    tau, command_tau = driver.step()
-    q_next, qdot_next = teacher.step(tau)
+    if input_enabled:
+        a_normalized = command_source.step()
+    else:
+        a_normalized = np.zeros(teacher.n_dof)
 
-    x_next = np.concatenate([q_next, qdot_next, tau])
-    command = np.concatenate([
-        np.zeros(teacher.n_dof),
-        np.zeros(teacher.n_dof),
-        command_tau,
-    ])
-    return x_t, command, x_next
-
-
-def evaluate_short_rollout(
-    teacher: ICubTeacher,
-    scaler: StateScaler,
-    driver: TorqueDriver,
-    network: PaperEBN,
-    q0: np.ndarray,
-    qdot0: np.ndarray,
-    *,
-    driver_seed: int,
-    sync_steps: int,
-    test_steps: int,
-    sync_feedback_gain: float,
-) -> dict | None:
-    """Synchronize to a teacher trajectory, then evaluate a short k=0 rollout."""
-    teacher.reset(q0, qdot0)
-    gravity = teacher.inverse_dynamics(
-        q0,
-        np.zeros(teacher.n_dof),
-        np.zeros(teacher.n_dof),
+    c_t = coords.command(a_normalized)
+    q_next, qdot_next = teacher.step_additive_acceleration(
+        coords.physical_acceleration(a_normalized)
     )
-    driver.reset(gravity, seed=driver_seed)
-    network.reset_state()
-    old_gain = network.feedback_gain
-    network.feedback_gain = sync_feedback_gain
+    x_next = coords.encode(q_next, qdot_next)
 
-    try:
-        for _ in range(sync_steps):
-            x_t, command, x_next = one_teacher_step(teacher, driver)
-            if not inside_limits(x_next[:teacher.n_dof], teacher):
-                return None
-            network.step(
-                scaler.encode_command(command),
-                scaler.encode_state(x_t),
-                learn=False,
-            )
-
-        network.feedback_gain = 0.0
-        errors = []
-        for _ in range(test_steps):
-            _, command, x_next = one_teacher_step(teacher, driver)
-            if not inside_limits(x_next[:teacher.n_dof], teacher):
-                break
-            estimate = network.step(
-                scaler.encode_command(command),
-                teacher_state=None,
-                learn=False,
-            )
-            errors.append(scaler.encode_state(x_next) - estimate)
-
-        if not errors:
-            return None
-
-        error = np.asarray(errors)
-        n = teacher.n_dof
-        return {
-            "steps": int(len(error)),
-            "rmse": float(np.sqrt(np.mean(error**2))),
-            "q_rmse": float(np.sqrt(np.mean(error[:, :n]**2))),
-            "qdot_rmse": float(np.sqrt(np.mean(error[:, n:2*n]**2))),
-            "tau_rmse": float(np.sqrt(np.mean(error[:, 2*n:]**2))),
-        }
-    finally:
-        network.feedback_gain = old_gain
-
-
-def run_neighborhood_diagnostic(
-    teacher: ICubTeacher,
-    scaler: StateScaler,
-    driver: TorqueDriver,
-    network: PaperEBN,
-    q0: np.ndarray,
-    qdot0: np.ndarray,
-    *,
-    driver_seed: int,
-    sync_steps: int,
-    test_steps: int = 25,
-    sync_feedback_gain: float,
-    epsilons=(0.005, 0.01, 0.02),
-) -> dict:
-    """Test k=0 prediction on nearby *real teacher trajectories*.
-
-    Perturbations are expressed in normalized state units. Each perturbed
-    initial condition is simulated by the real iCub teacher, the EBN is
-    synchronized to that trajectory using the same protocol as the main test,
-    and feedback is then removed. This avoids constructing artificial hidden
-    EBN states.
-    """
-    baseline = evaluate_short_rollout(
-        teacher,
-        scaler,
-        driver,
-        network,
-        q0,
-        qdot0,
-        driver_seed=driver_seed,
-        sync_steps=sync_steps,
-        test_steps=test_steps,
-        sync_feedback_gain=sync_feedback_gain,
+    xhat_next = network.step(
+        c_t,
+        teacher_state=x_t if learn or network.feedback_gain != 0.0 else None,
+        learn=learn,
     )
-    if baseline is None:
-        raise RuntimeError("Neighborhood diagnostic baseline is invalid.")
-
-    result = {
-        "test_steps": int(test_steps),
-        "baseline": baseline,
-        "q": {},
-        "qdot": {},
-    }
-    n = teacher.n_dof
-
-    for kind in ("q", "qdot"):
-        physical_scale = scaler.q_scale if kind == "q" else scaler.qdot_scale
-        for eps in epsilons:
-            trials = []
-            for joint in range(n):
-                for sign in (-1.0, 1.0):
-                    q = q0.copy()
-                    qdot = qdot0.copy()
-                    if kind == "q":
-                        q[joint] += sign * eps * physical_scale[joint]
-                        if q[joint] <= teacher.lower[joint] or q[joint] >= teacher.upper[joint]:
-                            continue
-                    else:
-                        qdot[joint] += sign * eps * physical_scale[joint]
-
-                    trial = evaluate_short_rollout(
-                        teacher,
-                        scaler,
-                        driver,
-                        network,
-                        q,
-                        qdot,
-                        driver_seed=driver_seed,
-                        sync_steps=sync_steps,
-                        test_steps=test_steps,
-                        sync_feedback_gain=sync_feedback_gain,
-                    )
-                    if trial is not None:
-                        trials.append(trial)
-
-            if not trials:
-                result[kind][str(eps)] = {"valid_trials": 0}
-                continue
-
-            mean_rmse = float(np.mean([trial["rmse"] for trial in trials]))
-            mean_q = float(np.mean([trial["q_rmse"] for trial in trials]))
-            mean_qdot = float(np.mean([trial["qdot_rmse"] for trial in trials]))
-            mean_tau = float(np.mean([trial["tau_rmse"] for trial in trials]))
-            result[kind][str(eps)] = {
-                "valid_trials": int(len(trials)),
-                "rmse": mean_rmse,
-                "q_rmse": mean_q,
-                "qdot_rmse": mean_qdot,
-                "tau_rmse": mean_tau,
-                "rmse_ratio_to_baseline": mean_rmse / baseline["rmse"],
-            }
-
-    return result
-
-
-def _probe_one_step_k0(
-    network: PaperEBN,
-    command_normalized: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return (state_before, state_after_one_k0_step) without altering the EBN."""
-    u0 = network.u.copy()
-    r0 = network.r.copy()
-    spikes0 = network.spikes.copy()
-    gain0 = network.feedback_gain
-    try:
-        state_before = network.decoded_state.copy()
-        network.feedback_gain = 0.0
-        state_after = network.step(
-            np.asarray(command_normalized, dtype=float),
-            teacher_state=None,
-            learn=False,
-        )
-        return state_before, state_after
-    finally:
-        network.u[:] = u0
-        network.r[:] = r0
-        network.spikes[:] = spikes0
-        network.feedback_gain = gain0
-
-
-def run_one_step_residual_diagnostic(
-    teacher: ICubTeacher,
-    scaler: StateScaler,
-    driver: TorqueDriver,
-    network: PaperEBN,
-    *,
-    seed: int,
-    sync_steps: int,
-    feedback_gain: float,
-    episodes: int = 20,
-    anchors_per_episode: int = 20,
-) -> dict:
-    """Measure k=0 one-step dynamics residuals at synchronized unseen states.
-
-    The EBN is synchronized with teacher feedback but not trained. At each
-    anchor we temporarily remove feedback for exactly one step, compare the
-    resulting decoded change with the teacher's true change, restore the EBN,
-    then continue synchronization. This isolates the learned autonomous
-    dynamics from long-horizon error accumulation.
-    """
-    rng = np.random.default_rng(seed)
-    n = teacher.n_dof
-    next_errors = []
-    increment_errors = []
-    start_errors = []
-
-    for episode in range(episodes):
-        q0, qdot0 = sample_initial_state(teacher, scaler, rng)
-        teacher.reset(q0, qdot0)
-        gravity = teacher.inverse_dynamics(
-            q0,
-            np.zeros(n),
-            np.zeros(n),
-        )
-        driver.reset(gravity, seed=seed + 1000 + episode)
-        network.reset_state()
-        old_gain = network.feedback_gain
-        network.feedback_gain = feedback_gain
-
-        try:
-            for _ in range(sync_steps):
-                x_t, command, x_next = one_teacher_step(teacher, driver)
-                if not inside_limits(x_next[:n], teacher):
-                    break
-                network.step(
-                    scaler.encode_command(command),
-                    scaler.encode_state(x_t),
-                    learn=False,
-                )
-
-            for _ in range(anchors_per_episode):
-                x_t, command, x_next = one_teacher_step(teacher, driver)
-                if not inside_limits(x_next[:n], teacher):
-                    break
-
-                x_t_n = scaler.encode_state(x_t)
-                x_next_n = scaler.encode_state(x_next)
-                c_n = scaler.encode_command(command)
-
-                xhat_t, xhat_next = _probe_one_step_k0(network, c_n)
-                start_errors.append(x_t_n - xhat_t)
-                next_errors.append(x_next_n - xhat_next)
-                increment_errors.append(
-                    (x_next_n - x_t_n) - (xhat_next - xhat_t)
-                )
-
-                # Resume the real synchronized teacher/student trajectory.
-                network.step(c_n, x_t_n, learn=False)
-        finally:
-            network.feedback_gain = old_gain
-
-    if not next_errors:
-        raise RuntimeError("No valid states collected for one-step diagnostic.")
-
-    next_errors = np.asarray(next_errors)
-    increment_errors = np.asarray(increment_errors)
-    start_errors = np.asarray(start_errors)
-
-    scales = np.concatenate([
-        scaler.q_scale,
-        scaler.qdot_scale,
-        scaler.torque_scale,
-    ])
-    physical_increment_errors = increment_errors * scales
-    names = (
-        [f"q:{name}" for name in teacher.active_joint_names]
-        + [f"qdot:{name}" for name in teacher.active_joint_names]
-        + [f"tau:{name}" for name in teacher.active_joint_names]
-    )
-
-    per_dimension = {}
-    for i, name in enumerate(names):
-        per_dimension[name] = {
-            "next_state_rmse_normalized": float(
-                np.sqrt(np.mean(next_errors[:, i] ** 2))
-            ),
-            "increment_bias_normalized": float(
-                np.mean(increment_errors[:, i])
-            ),
-            "increment_rmse_normalized": float(
-                np.sqrt(np.mean(increment_errors[:, i] ** 2))
-            ),
-            "increment_rmse_physical": float(
-                np.sqrt(np.mean(physical_increment_errors[:, i] ** 2))
-            ),
-            "derivative_rmse_normalized_per_s": float(
-                np.sqrt(np.mean(increment_errors[:, i] ** 2)) / network.dt
-            ),
-        }
-
-    def group_summary(sl):
-        return {
-            "next_state_rmse_normalized": float(
-                np.sqrt(np.mean(next_errors[:, sl] ** 2))
-            ),
-            "increment_rmse_normalized": float(
-                np.sqrt(np.mean(increment_errors[:, sl] ** 2))
-            ),
-            "increment_bias_norm_normalized": float(
-                np.linalg.norm(np.mean(increment_errors[:, sl], axis=0))
-            ),
-        }
-
-    ranking = sorted(
-        (
-            (name, metrics["increment_rmse_normalized"])
-            for name, metrics in per_dimension.items()
-        ),
-        key=lambda item: item[1],
-        reverse=True,
-    )
-
-    return {
-        "samples": int(len(next_errors)),
-        "episodes_requested": int(episodes),
-        "anchors_per_episode": int(anchors_per_episode),
-        "start_representation_rmse_normalized": float(
-            np.sqrt(np.mean(start_errors**2))
-        ),
-        "groups": {
-            "q": group_summary(slice(0, n)),
-            "qdot": group_summary(slice(n, 2 * n)),
-            "tau": group_summary(slice(2 * n, 3 * n)),
-        },
-        "worst_dimensions": [
-            {"name": name, "increment_rmse_normalized": float(value)}
-            for name, value in ranking[:10]
-        ],
-        "per_dimension": per_dimension,
-    }
+    return x_next, xhat_next, c_t
 
 
 def run_experiment(
     *,
     dt: float = 1e-3,
-    n_neurons: int = 256,
-    train_episodes: int = 30,
-    train_steps: int = 250,
-    sync_steps: int = 75,
-    test_steps: int = 250,
-    feedback_gain: float = 40.0,
-    final_feedback_gain: float = 10.0,
+    n_neurons: int = 200,
+    train_iterations: int = 500,
+    steps_per_iteration: int = 200,
+    test_input_steps: int = 100,
+    test_free_steps: int = 100,
+    feedback_start: float = 40.0,
+    feedback_end: float = 5.0,
     eta: float = 0.05,
-    torque_fraction: float = 0.02,
+    input_amplitude: float = 0.35,
     seed: int = 0,
-    perturbation_diagnostic: bool = False,
-    diagnostic_steps: int = 25,
-    one_step_diagnostic: bool = False,
-    residual_episodes: int = 20,
-    residual_anchors: int = 20,
 ) -> dict:
-    """Train on iCub dynamics, switch feedback off, and test unseen motion."""
+    """Train exactly with Eq. 11/12, then test with k_test=0."""
     teacher = ICubTeacher(dt=dt, integration_substeps=4)
-    torque_scale = characteristic_torque_scale(teacher, seed=seed)
-    scaler = StateScaler(teacher, torque_scale)
-    driver = TorqueDriver(
-        torque_scale,
+    coords = ArmCoordinates(teacher)
+    source = FilteredRandomInput(
+        teacher.n_dof,
         dt,
-        fraction=torque_fraction,
+        amplitude=input_amplitude,
         seed=seed,
     )
     network = PaperEBN(
-        state_dim=3 * teacher.n_dof,
+        state_dim=2 * teacher.n_dof,
         n_neurons=n_neurons,
         dt=dt,
         eta=eta,
-        feedback_gain=feedback_gain,
+        feedback_gain=feedback_start,
         seed=seed,
     )
 
-    rng = np.random.default_rng(seed)
-    training_rmse = []
+    training_rmse = np.empty(train_iterations)
 
     try:
-        # TRAINING: start with strong teacher feedback and reduce it as
-        # learning proceeds, following the procedure described in the paper.
-        for episode in range(train_episodes):
-            if train_episodes <= 1:
-                network.feedback_gain = final_feedback_gain
-            else:
-                fraction = episode / (train_episodes - 1)
-                network.feedback_gain = (
-                    feedback_gain
-                    + fraction * (final_feedback_gain - feedback_gain)
-                )
-            q0, qdot0 = sample_initial_state(teacher, scaler, rng)
-            teacher.reset(q0, qdot0)
-            gravity = teacher.inverse_dynamics(
-                q0,
-                np.zeros(teacher.n_dof),
-                np.zeros(teacher.n_dof),
-            )
-            driver.reset(gravity, seed=seed + episode)
+        # Each learning iteration starts from the same well-defined mechanical
+        # state.  W_slow persists; neural state is reset.
+        for iteration in range(train_iterations):
+            teacher.reset(coords.q0, np.zeros(teacher.n_dof))
             network.reset_state()
+            source.reset(seed + iteration)
 
-            # Synchronize neural state to a new teacher initial condition.
-            for _ in range(sync_steps):
-                x_t, command, x_next = one_teacher_step(teacher, driver)
-                if not inside_limits(x_next[:teacher.n_dof], teacher):
-                    break
-                network.step(
-                    scaler.encode_command(command),
-                    scaler.encode_state(x_t),
-                    learn=False,
-                )
+            network.feedback_gain = feedback_for_iteration(
+                iteration,
+                train_iterations,
+                feedback_start,
+                feedback_end,
+            )
 
-            errors = []
-            for _ in range(train_steps):
-                x_t, command, x_next = one_teacher_step(teacher, driver)
-                if not inside_limits(x_next[:teacher.n_dof], teacher):
-                    break
-                estimate = network.step(
-                    scaler.encode_command(command),
-                    scaler.encode_state(x_t),
+            squared_error = []
+            for _ in range(steps_per_iteration):
+                target, estimate, _ = run_teacher_network_step(
+                    teacher,
+                    coords,
+                    source,
+                    network,
                     learn=True,
                 )
-                errors.append(
-                    np.sqrt(
-                        np.mean(
-                            (
-                                scaler.encode_state(x_next)
-                                - estimate
-                            ) ** 2
-                        )
+                if np.any(teacher.q < teacher.lower) or np.any(teacher.q > teacher.upper):
+                    raise RuntimeError(
+                        "Training trajectory left the iCub hardware joint range; "
+                        "reduce input_amplitude or iteration duration."
                     )
-                )
-            training_rmse.append(
-                float(np.sqrt(np.mean(np.square(errors))))
-                if errors else float("nan")
-            )
+                squared_error.append(np.mean((target - estimate) ** 2))
 
-        # TEST: unseen initial state/input, learning OFF, k=0 after sync.
-        # Use an independent fixed RNG so comparisons with different training
-        # lengths are evaluated on exactly the same test initial condition.
-        eval_rng = np.random.default_rng(seed + 100000)
-        q0, qdot0 = sample_initial_state(teacher, scaler, eval_rng)
-        teacher.reset(q0, qdot0)
-        gravity = teacher.inverse_dynamics(
-            q0,
-            np.zeros(teacher.n_dof),
-            np.zeros(teacher.n_dof),
-        )
-        driver.reset(gravity, seed=seed + 100000)
+            training_rmse[iteration] = np.sqrt(np.mean(squared_error))
+
+        # Paper test phase: unseen random input, k_test = 0, learning disabled.
+        teacher.reset(coords.q0, np.zeros(teacher.n_dof))
         network.reset_state()
-        network.feedback_gain = final_feedback_gain
-
-        for _ in range(sync_steps):
-            x_t, command, x_next = one_teacher_step(teacher, driver)
-            if not inside_limits(x_next[:teacher.n_dof], teacher):
-                break
-            network.step(
-                scaler.encode_command(command),
-                scaler.encode_state(x_t),
-                learn=False,
-            )
-
-        old_gain = network.feedback_gain
+        source.reset(seed + 1_000_000)
         network.feedback_gain = 0.0
 
-        teacher_norm = []
-        estimate_norm = []
-        teacher_physical = []
-        estimate_physical = []
-        spike_rows = []
-        spike_times = []
+        total_steps = test_input_steps + test_free_steps
+        targets = np.empty((total_steps, 2 * teacher.n_dof))
+        estimates = np.empty_like(targets)
+        spikes = []
 
-        try:
-            for t in range(test_steps):
-                _, command, x_next = one_teacher_step(teacher, driver)
-                if not inside_limits(x_next[:teacher.n_dof], teacher):
-                    break
-
-                estimate = network.step(
-                    scaler.encode_command(command),
-                    teacher_state=None,
-                    learn=False,
+        for t in range(total_steps):
+            target, estimate, _ = run_teacher_network_step(
+                teacher,
+                coords,
+                source,
+                network,
+                learn=False,
+                input_enabled=t < test_input_steps,
+            )
+            if np.any(teacher.q < teacher.lower) or np.any(teacher.q > teacher.upper):
+                raise RuntimeError(
+                    "Test trajectory left the iCub hardware joint range; "
+                    "reduce input amplitude or test duration."
+                )
+            targets[t] = target
+            estimates[t] = estimate
+            for neuron in np.flatnonzero(network.spikes):
+                spikes.extend(
+                    (t * dt, int(neuron))
+                    for _ in range(int(network.spikes[neuron]))
                 )
 
-                target = scaler.encode_state(x_next)
-                teacher_norm.append(target)
-                estimate_norm.append(estimate)
-                teacher_physical.append(x_next.copy())
-                estimate_physical.append(scaler.decode_state(estimate))
-
-                neurons = np.flatnonzero(network.spikes)
-                for neuron in neurons:
-                    for _ in range(int(network.spikes[neuron])):
-                        spike_times.append(t * dt)
-                        spike_rows.append(int(neuron))
-        finally:
-            network.feedback_gain = old_gain
-
-        teacher_norm = np.asarray(teacher_norm)
-        estimate_norm = np.asarray(estimate_norm)
-        teacher_physical = np.asarray(teacher_physical)
-        estimate_physical = np.asarray(estimate_physical)
-
-        if len(teacher_norm) == 0:
-            raise RuntimeError("Test trajectory left joint limits immediately.")
-
-        error = teacher_norm - estimate_norm
+        error = targets - estimates
         n = teacher.n_dof
-
-        perturbation_summary = None
-        if perturbation_diagnostic:
-            perturbation_summary = run_neighborhood_diagnostic(
-                teacher,
-                scaler,
-                driver,
-                network,
-                q0,
-                qdot0,
-                driver_seed=seed + 100000,
-                sync_steps=sync_steps,
-                test_steps=diagnostic_steps,
-                sync_feedback_gain=final_feedback_gain,
-            )
-
-        one_step_summary = None
-        if one_step_diagnostic:
-            one_step_summary = run_one_step_residual_diagnostic(
-                teacher,
-                scaler,
-                driver,
-                network,
-                seed=seed + 200000,
-                sync_steps=sync_steps,
-                feedback_gain=final_feedback_gain,
-                episodes=residual_episodes,
-                anchors_per_episode=residual_anchors,
-            )
-
-        horizon_rmse = {}
-        for horizon in (1, 5, 10, 25, 50, 100, 200, 250):
-            if horizon <= len(error):
+        horizons = {}
+        for horizon in (1, 5, 10, 25, 50, 100, total_steps):
+            if horizon <= total_steps:
                 prefix = error[:horizon]
-                horizon_rmse[horizon] = {
+                horizons[horizon] = {
                     "rmse": float(np.sqrt(np.mean(prefix**2))),
                     "q_rmse": float(np.sqrt(np.mean(prefix[:, :n]**2))),
-                    "qdot_rmse": float(
-                        np.sqrt(np.mean(prefix[:, n:2*n]**2))
-                    ),
-                    "tau_rmse": float(
-                        np.sqrt(np.mean(prefix[:, 2*n:]**2))
-                    ),
+                    "qdot_rmse": float(np.sqrt(np.mean(prefix[:, n:]**2))),
                 }
+
+        teacher_physical = np.empty_like(targets)
+        estimate_physical = np.empty_like(estimates)
+        for i in range(total_steps):
+            tq, tv = coords.decode(targets[i])
+            eq, ev = coords.decode(estimates[i])
+            teacher_physical[i] = np.concatenate([tq, tv])
+            estimate_physical[i] = np.concatenate([eq, ev])
 
         return {
             "dt": dt,
             "joint_names": list(teacher.active_joint_names),
-            "training_rmse": np.asarray(training_rmse),
+            "training_rmse": training_rmse,
             "teacher": teacher_physical,
             "estimate": estimate_physical,
             "normalized_error": error,
             "rmse": float(np.sqrt(np.mean(error**2))),
             "q_rmse": float(np.sqrt(np.mean(error[:, :n]**2))),
-            "qdot_rmse": float(np.sqrt(np.mean(error[:, n:2*n]**2))),
-            "tau_rmse": float(np.sqrt(np.mean(error[:, 2*n:]**2))),
-            "executed_test_steps": int(len(error)),
-            "horizon_rmse": horizon_rmse,
-            "feedback_start": float(feedback_gain),
-            "feedback_final": float(final_feedback_gain),
-            "spike_times": np.asarray(spike_times),
-            "spike_neurons": np.asarray(spike_rows, dtype=int),
+            "qdot_rmse": float(np.sqrt(np.mean(error[:, n:]**2))),
+            "horizon_rmse": horizons,
+            "test_input_steps": int(test_input_steps),
+            "test_free_steps": int(test_free_steps),
             "slow_weight_norm": float(np.linalg.norm(network.W_slow)),
-            "perturbation_diagnostic": perturbation_summary,
-            "one_step_residual_diagnostic": one_step_summary,
+            "spike_times": np.asarray([item[0] for item in spikes]),
+            "spike_neurons": np.asarray(
+                [item[1] for item in spikes],
+                dtype=int,
+            ),
         }
     finally:
         teacher.close()
@@ -781,33 +313,30 @@ def save_results(result: dict, output: Path) -> None:
     n = len(result["joint_names"])
     time = np.arange(len(result["teacher"])) * result["dt"]
 
-    fig, axes = plt.subplots(4, 1, figsize=(12, 12), sharex=False)
+    fig, axes = plt.subplots(4, 1, figsize=(12, 12))
 
-    for j, name in enumerate(result["joint_names"]):
-        axes[0].plot(time, result["teacher"][:, j], label=f"{name} teacher")
-        axes[0].plot(
-            time,
-            result["estimate"][:, j],
-            linestyle="--",
-            label=f"{name} EBN",
-        )
+    for j in range(n):
+        axes[0].plot(time, result["teacher"][:, j])
+        axes[0].plot(time, result["estimate"][:, j], linestyle="--")
     axes[0].set_ylabel("q [rad]")
-    axes[0].set_title("iCub joint position: simulator vs paper EBN")
+    axes[0].set_title("iCub position: teacher / EBN")
 
-    for j, name in enumerate(result["joint_names"]):
-        axes[1].plot(time, result["teacher"][:, n+j], label=name)
-        axes[1].plot(
-            time,
-            result["estimate"][:, n+j],
-            linestyle="--",
-        )
+    for j in range(n):
+        axes[1].plot(time, result["teacher"][:, n + j])
+        axes[1].plot(time, result["estimate"][:, n + j], linestyle="--")
     axes[1].set_ylabel("qdot [rad/s]")
-    axes[1].set_title("Joint velocity")
+    axes[1].set_title("iCub velocity: teacher / EBN")
 
-    step_rmse = np.sqrt(np.mean(result["normalized_error"] ** 2, axis=1))
-    axes[2].plot(time, step_rmse)
+    axes[2].plot(
+        time,
+        np.sqrt(np.mean(result["normalized_error"] ** 2, axis=1)),
+    )
+    axes[2].axvline(
+        result["test_input_steps"] * result["dt"],
+        linestyle="--",
+    )
     axes[2].set_ylabel("normalized RMSE")
-    axes[2].set_title("Autonomous error after feedback is removed")
+    axes[2].set_title("k_test = 0; dashed line = command switched off")
 
     axes[3].scatter(
         result["spike_times"],
@@ -832,76 +361,58 @@ def save_results(result: dict, output: Path) -> None:
         spike_neurons=result["spike_neurons"],
     )
 
-    metrics = {
-        key: value
-        for key, value in result.items()
-        if key in (
-            "rmse",
-            "q_rmse",
-            "qdot_rmse",
-            "tau_rmse",
-            "executed_test_steps",
-            "slow_weight_norm",
+    output.with_suffix(".json").write_text(
+        json.dumps(
+            {
+                "rmse": result["rmse"],
+                "q_rmse": result["q_rmse"],
+                "qdot_rmse": result["qdot_rmse"],
+                "horizon_rmse": result["horizon_rmse"],
+                "slow_weight_norm": result["slow_weight_norm"],
+            },
+            indent=2,
         )
-    }
-    output.with_suffix(".json").write_text(json.dumps(metrics, indent=2))
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Train the paper EBN directly on iCubGenova11 arm dynamics."
+        description="Strict Alemi et al. paper-form EBN on iCub arm dynamics."
     )
     parser.add_argument("--output", type=Path, default=Path("results/paper_on_icub.png"))
-    parser.add_argument("--neurons", type=int, default=256)
-    parser.add_argument("--train-episodes", type=int, default=30)
-    parser.add_argument("--train-steps", type=int, default=250)
-    parser.add_argument("--test-steps", type=int, default=250)
-    parser.add_argument("--sync-steps", type=int, default=75)
-    parser.add_argument("--feedback-gain", type=float, default=40.0)
-    parser.add_argument("--final-feedback-gain", type=float, default=10.0)
+    parser.add_argument("--neurons", type=int, default=200)
+    parser.add_argument("--train-iterations", type=int, default=500)
+    parser.add_argument("--steps-per-iteration", type=int, default=200)
+    parser.add_argument("--test-input-steps", type=int, default=100)
+    parser.add_argument("--test-free-steps", type=int, default=100)
+    parser.add_argument("--feedback-start", type=float, default=40.0)
+    parser.add_argument("--feedback-end", type=float, default=5.0)
     parser.add_argument("--eta", type=float, default=0.05)
+    parser.add_argument("--input-amplitude", type=float, default=0.35)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--perturbation-diagnostic", action="store_true")
-    parser.add_argument("--diagnostic-steps", type=int, default=25)
-    parser.add_argument("--one-step-diagnostic", action="store_true")
-    parser.add_argument("--residual-episodes", type=int, default=20)
-    parser.add_argument("--residual-anchors", type=int, default=20)
     parser.add_argument("--no-plot", action="store_true")
     args = parser.parse_args()
 
     result = run_experiment(
         n_neurons=args.neurons,
-        train_episodes=args.train_episodes,
-        train_steps=args.train_steps,
-        sync_steps=args.sync_steps,
-        test_steps=args.test_steps,
-        feedback_gain=args.feedback_gain,
-        final_feedback_gain=args.final_feedback_gain,
+        train_iterations=args.train_iterations,
+        steps_per_iteration=args.steps_per_iteration,
+        test_input_steps=args.test_input_steps,
+        test_free_steps=args.test_free_steps,
+        feedback_start=args.feedback_start,
+        feedback_end=args.feedback_end,
         eta=args.eta,
+        input_amplitude=args.input_amplitude,
         seed=args.seed,
-        perturbation_diagnostic=args.perturbation_diagnostic,
-        diagnostic_steps=args.diagnostic_steps,
-        one_step_diagnostic=args.one_step_diagnostic,
-        residual_episodes=args.residual_episodes,
-        residual_anchors=args.residual_anchors,
     )
 
-    summary = {
+    print(json.dumps({
         "rmse": result["rmse"],
         "q_rmse": result["q_rmse"],
         "qdot_rmse": result["qdot_rmse"],
-        "tau_rmse": result["tau_rmse"],
-        "executed_test_steps": result["executed_test_steps"],
-        "slow_weight_norm": result["slow_weight_norm"],
         "horizon_rmse": result["horizon_rmse"],
-        "feedback_start": result["feedback_start"],
-        "feedback_final": result["feedback_final"],
-        "perturbation_diagnostic": result["perturbation_diagnostic"],
-        "one_step_residual_diagnostic": result[
-            "one_step_residual_diagnostic"
-        ],
-    }
-    print(json.dumps(summary, indent=2))
+        "slow_weight_norm": result["slow_weight_norm"],
+    }, indent=2))
 
     if not args.no_plot:
         save_results(result, args.output)
