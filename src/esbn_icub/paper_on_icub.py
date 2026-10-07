@@ -167,13 +167,13 @@ def run_experiment(
     dt: float = 1e-3,
     n_neurons: int = 200,
     train_iterations: int = 500,
-    steps_per_iteration: int = 200,
-    test_input_steps: int = 100,
-    test_free_steps: int = 100,
+    steps_per_iteration: int = 50,
+    test_input_steps: int = 50,
+    test_free_steps: int = 50,
     feedback_start: float = 40.0,
     feedback_end: float = 5.0,
     eta: float = 0.05,
-    input_amplitude: float = 0.35,
+    input_amplitude: float = 0.05,
     seed: int = 0,
 ) -> dict:
     """Train exactly with Eq. 11/12, then test with k_test=0."""
@@ -382,13 +382,13 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("results/paper_on_icub.png"))
     parser.add_argument("--neurons", type=int, default=200)
     parser.add_argument("--train-iterations", type=int, default=500)
-    parser.add_argument("--steps-per-iteration", type=int, default=200)
-    parser.add_argument("--test-input-steps", type=int, default=100)
-    parser.add_argument("--test-free-steps", type=int, default=100)
+    parser.add_argument("--steps-per-iteration", type=int, default=50)
+    parser.add_argument("--test-input-steps", type=int, default=50)
+    parser.add_argument("--test-free-steps", type=int, default=50)
     parser.add_argument("--feedback-start", type=float, default=40.0)
     parser.add_argument("--feedback-end", type=float, default=5.0)
     parser.add_argument("--eta", type=float, default=0.05)
-    parser.add_argument("--input-amplitude", type=float, default=0.35)
+    parser.add_argument("--input-amplitude", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-plot", action="store_true")
     args = parser.parse_args()
