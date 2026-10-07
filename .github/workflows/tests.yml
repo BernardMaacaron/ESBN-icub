@@ -28,61 +28,9 @@ jobs:
           sudo apt-get install -y liburdfdom-dev
       - run: pip install -e ".[test,robot]"
       - run: pytest -q tests/test_icub_teacher.py tests/test_paper_on_icub.py
-      - name: End-to-end smoke run
+      - name: Strict paper-form smoke run
         run: |
-          python -m esbn_icub.paper_on_icub \
-            --neurons 64 \
-            --train-episodes 2 \
-            --train-steps 40 \
-            --test-steps 40 \
-            --no-plot
-      - name: Untrained autonomous baseline
+          python -m esbn_icub.paper_on_icub             --neurons 64             --train-iterations 2             --steps-per-iteration 25             --test-input-steps 10             --test-free-steps 10             --input-amplitude 0.05             --no-plot
+      - name: Strict paper-form canonical run
         run: |
-          echo "EXPERIMENT untrained_baseline"
-          python -m esbn_icub.paper_on_icub \
-            --train-episodes 0 \
-            --no-plot
-      - name: Local perturbation diagnostic
-        run: |
-          echo "EXPERIMENT local_perturbation_diagnostic"
-          python -m esbn_icub.paper_on_icub \
-            --feedback-gain 40 \
-            --final-feedback-gain 40 \
-            --perturbation-diagnostic \
-            --diagnostic-steps 100 \
-            --no-plot
-      - name: One-step residual diagnostic
-        run: |
-          echo "EXPERIMENT one_step_residual_diagnostic"
-          python -m esbn_icub.paper_on_icub \
-            --feedback-gain 40 \
-            --final-feedback-gain 40 \
-            --one-step-diagnostic \
-            --residual-episodes 20 \
-            --residual-anchors 20 \
-            --no-plot
-      - name: Baseline constant-feedback run
-        run: |
-          echo "EXPERIMENT baseline_constant_feedback"
-          python -m esbn_icub.paper_on_icub \
-            --feedback-gain 40 \
-            --final-feedback-gain 40 \
-            --no-plot
-      - name: Canonical annealed-feedback run
-        run: |
-          echo "EXPERIMENT canonical_annealed_feedback"
-          python -m esbn_icub.paper_on_icub \
-            --feedback-gain 40 \
-            --final-feedback-gain 10 \
-            --no-plot
-      - name: Longer-training annealed run
-        run: |
-          echo "EXPERIMENT longer_training_annealed"
-          python -m esbn_icub.paper_on_icub \
-            --train-episodes 200 \
-            --train-steps 250 \
-            --sync-steps 75 \
-            --feedback-gain 40 \
-            --final-feedback-gain 10 \
-            --eta 0.0075 \
-            --no-plot
+          python -m esbn_icub.paper_on_icub --no-plot
