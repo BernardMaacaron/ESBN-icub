@@ -174,6 +174,89 @@ class ICubTeacher:
             dtype=float,
         ).copy()
 
+    def passive_acceleration(self, q, qdot):
+        """Unforced rigid-body acceleration f_v(q, qdot)."""
+        zeros = np.zeros(self.n_dof)
+        return self.acceleration(q, qdot, zeros)
+
+    def _rk4_substep_additive_acceleration(
+        self,
+        q,
+        qdot,
+        acceleration_command,
+        h,
+    ):
+        """RK4 step for qddot=f_passive(q,qdot)+a_command."""
+        acceleration_command = np.asarray(acceleration_command, dtype=float)
+
+        a1 = self.passive_acceleration(q, qdot) + acceleration_command
+
+        v2 = qdot + 0.5 * h * a1
+        q2 = np.asarray(
+            pin.integrate(self.model, q, 0.5 * h * qdot),
+            dtype=float,
+        )
+        a2 = self.passive_acceleration(q2, v2) + acceleration_command
+
+        v3 = qdot + 0.5 * h * a2
+        q3 = np.asarray(
+            pin.integrate(self.model, q, 0.5 * h * v2),
+            dtype=float,
+        )
+        a3 = self.passive_acceleration(q3, v3) + acceleration_command
+
+        v4 = qdot + h * a3
+        q4 = np.asarray(
+            pin.integrate(self.model, q, h * v3),
+            dtype=float,
+        )
+        a4 = self.passive_acceleration(q4, v4) + acceleration_command
+
+        qdot_next = qdot + (h / 6.0) * (
+            a1 + 2.0 * a2 + 2.0 * a3 + a4
+        )
+        tangent_step = (h / 6.0) * (
+            qdot + 2.0 * v2 + 2.0 * v3 + v4
+        )
+        q_next = np.asarray(
+            pin.integrate(self.model, q, tangent_step),
+            dtype=float,
+        )
+        return q_next, qdot_next
+
+    def step_additive_acceleration(self, acceleration_command):
+        """Advance xdot=f(x)+c with x=[q,qdot], c=[0,a_command].
+
+        This is the exact additive-input teacher form assumed by the paper.
+        It is intentionally distinct from physical joint-torque actuation.
+        """
+        acceleration_command = np.asarray(
+            acceleration_command,
+            dtype=float,
+        )
+        if acceleration_command.shape != (self.n_dof,):
+            raise ValueError(
+                f"acceleration_command must have shape {(self.n_dof,)}"
+            )
+
+        q = self.q
+        qdot = self.qdot
+        for _ in range(self.integration_substeps):
+            q, qdot = self._rk4_substep_additive_acceleration(
+                q,
+                qdot,
+                acceleration_command,
+                self.integration_dt,
+            )
+            if np.any(~np.isfinite(q)) or np.any(~np.isfinite(qdot)):
+                raise FloatingPointError(
+                    "Non-finite state in additive iCub integration"
+                )
+
+        self.q = q
+        self.qdot = qdot
+        return self.state()
+
     def _rk4_substep(self, q, qdot, tau, h):
         """One fourth-order integration substep on the configuration manifold."""
         a1 = self.acceleration(q, qdot, tau)
